@@ -23,6 +23,7 @@ WEB_SEARCH_TOOL_NAMES = [
     "firecrawl_extract_web_page",
     "web_search_exa",
     "exa_get_contents",
+    "web_search_grok",
 ]
 _TAVILY_WEB_SEARCH_TOOL_CONFIG = {
     "provider_settings.web_search": True,
@@ -47,6 +48,10 @@ _BAIDU_WEB_SEARCH_TOOL_CONFIG = {
 _EXA_WEB_SEARCH_TOOL_CONFIG = {
     "provider_settings.web_search": True,
     "provider_settings.websearch_provider": "exa",
+}
+_GROK_WEB_SEARCH_TOOL_CONFIG = {
+    "provider_settings.web_search": True,
+    "provider_settings.websearch_provider": "grok",
 }
 
 
@@ -157,7 +162,20 @@ def _cache_favicon(url: str, favicon: str | None) -> None:
         sp.temporary_cache["_ws_favicon"][url] = favicon
 
 
-def _search_result_payload(results: list[SearchResult]) -> str:
+def _search_result_payload(
+    results: list[SearchResult],
+    *,
+    summary: str | None = None,
+) -> str:
+    """Serialize normalized search results for tool output.
+
+    Args:
+        results: Search results to serialize.
+        summary: Optional provider-generated search summary.
+
+    Returns:
+        A JSON string containing the summary and indexed results.
+    """
     ref_uuid = str(uuid.uuid4())[:4]
     ret_ls = []
     for idx, result in enumerate(results, 1):
@@ -171,7 +189,113 @@ def _search_result_payload(results: list[SearchResult]) -> str:
             }
         )
         _cache_favicon(result.url, result.favicon)
-    return json.dumps({"results": ret_ls}, ensure_ascii=False)
+    payload: dict = {"results": ret_ls}
+    if summary is not None:
+        payload["summary"] = summary
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _normalize_grok_citations(*citation_groups) -> list[SearchResult]:
+    """Normalize and deduplicate citations returned by Grok-compatible APIs.
+
+    Args:
+        *citation_groups: Citation values from message-level and top-level fields.
+
+    Returns:
+        Search results containing one entry per unique citation URL.
+    """
+    results: list[SearchResult] = []
+    seen_urls: set[str] = set()
+
+    for citation_group in citation_groups:
+        if not citation_group:
+            continue
+        citations = (
+            citation_group if isinstance(citation_group, list) else [citation_group]
+        )
+        for citation in citations:
+            if isinstance(citation, str):
+                url = citation.strip()
+                title = url
+                snippet = ""
+            elif isinstance(citation, dict):
+                url = str(citation.get("url", "")).strip()
+                title = str(citation.get("title") or url)
+                snippet = str(citation.get("snippet") or "")
+            else:
+                continue
+
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            results.append(SearchResult(title=title, url=url, snippet=snippet))
+
+    return results
+
+
+async def _grok_search(
+    provider_settings: dict,
+    query: str,
+) -> tuple[str, list[SearchResult]]:
+    """Call a Grok-compatible Chat Completions endpoint with native web search.
+
+    Args:
+        provider_settings: Grok API base, API key, and model configuration.
+        query: Web search query.
+
+    Returns:
+        The Grok-generated summary and normalized citation results.
+
+    Raises:
+        ValueError: If a required Grok setting is missing.
+        Exception: If the Grok-compatible endpoint returns an HTTP error.
+    """
+    api_base = str(provider_settings.get("websearch_grok_api_base", "")).strip()
+    if not api_base:
+        raise ValueError("Error: Grok API base is not configured in AstrBot.")
+
+    api_key = str(provider_settings.get("websearch_grok_api_key", "")).strip()
+    if not api_key:
+        raise ValueError("Error: Grok API key is not configured in AstrBot.")
+
+    model = str(provider_settings.get("websearch_grok_model", "")).strip()
+    if not model:
+        raise ValueError("Error: Grok model is not configured in AstrBot.")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": query}],
+        "search_parameters": {
+            "mode": "auto",
+            "return_citations": True,
+        },
+    }
+
+    async with aiohttp.ClientSession(trust_env=True) as session:
+        async with session.post(
+            f"{api_base.rstrip('/')}/chat/completions",
+            json=payload,
+            headers=headers,
+        ) as response:
+            if response.status != 200:
+                reason = await response.text()
+                raise Exception(
+                    f"Grok web search failed: {reason}, status: {response.status}",
+                )
+            data = await response.json()
+
+    choices = data.get("choices", [])
+    message = choices[0].get("message", {}) if choices else {}
+    summary = str(message.get("content") or "")
+    results = _normalize_grok_citations(
+        message.get("citations"),
+        data.get("citations"),
+    )
+    return summary, results
 
 
 async def _tavily_search(
@@ -582,6 +706,64 @@ async def _baidu_search(
                 for item in references
                 if item.get("url")
             ]
+
+
+@builtin_tool(config=_GROK_WEB_SEARCH_TOOL_CONFIG)
+@pydantic_dataclass
+class GrokWebSearchTool(FunctionTool[AstrAgentContext]):
+    """Search the web through a configured Grok-compatible API."""
+
+    name: str = "web_search_grok"
+    description: str = (
+        "A web search tool powered by Grok native search. It returns a synthesized "
+        "answer together with cited source URLs."
+    )
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Required. Search query."},
+                "max_results": {
+                    "type": "integer",
+                    "description": "Optional. Maximum number of cited sources to return. Default is 10. Range is 1-20.",
+                },
+            },
+            "required": ["query"],
+        }
+    )
+
+    async def call(self, context, **kwargs) -> ToolExecResult:
+        _, provider_settings, _ = _get_runtime(context)
+        required_settings = (
+            (
+                "websearch_grok_api_base",
+                "Error: Grok API base is not configured in AstrBot.",
+            ),
+            (
+                "websearch_grok_api_key",
+                "Error: Grok API key is not configured in AstrBot.",
+            ),
+            (
+                "websearch_grok_model",
+                "Error: Grok model is not configured in AstrBot.",
+            ),
+        )
+        for setting_name, error_message in required_settings:
+            if not str(provider_settings.get(setting_name, "")).strip():
+                return error_message
+
+        query = str(kwargs.get("query", "")).strip()
+        if not query:
+            return "Error: query must be a non-empty string."
+
+        try:
+            max_results = int(kwargs.get("max_results", 10))
+        except (TypeError, ValueError):
+            max_results = 10
+        max_results = min(max(max_results, 1), 20)
+
+        summary, results = await _grok_search(provider_settings, query)
+        return _search_result_payload(results[:max_results], summary=summary)
 
 
 @builtin_tool(config=_TAVILY_WEB_SEARCH_TOOL_CONFIG)
@@ -1242,6 +1424,7 @@ __all__ = [
     "BraveWebSearchTool",
     "ExaGetContentsTool",
     "ExaWebSearchTool",
+    "GrokWebSearchTool",
     "TavilyExtractWebPageTool",
     "TavilyWebSearchTool",
     "WEB_SEARCH_TOOL_NAMES",

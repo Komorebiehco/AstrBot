@@ -143,6 +143,17 @@
                 "websearch_exa_key": {
                     "description": "API-ключ Exa",
                     "hint": "Можно добавить несколько ключей для ротации. Получить ключ: https://dashboard.exa.ai"
+                },
+                "websearch_grok_api_base": {
+                    "description": "Базовый URL API Grok",
+                    "hint": "Укажите OpenAI-совместимый адрес с окончанием /v1, например https://api.x.ai/v1."
+                },
+                "websearch_grok_api_key": {
+                    "description": "API-ключ Grok"
+                },
+                "websearch_grok_model": {
+                    "description": "Модель Grok",
+                    "hint": "Укажите модель с поддержкой веб-поиска xAI, например grok-4-1-fast."
                 }
             }
         },

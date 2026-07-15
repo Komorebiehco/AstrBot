@@ -222,6 +222,9 @@ def extract_web_search_refs(accumulated_text: str, accumulated_parts: list) -> d
         "web_search_tavily",
         "web_search_bocha",
         "web_search_brave",
+        "web_search_firecrawl",
+        "web_search_exa",
+        "web_search_grok",
     ]
     web_search_results = {}
     tool_call_parts = [

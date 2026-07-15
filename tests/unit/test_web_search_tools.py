@@ -462,7 +462,11 @@ async def test_tavily_search_key_failover_on_quota_exceeded_432(
                 status=200,
                 jsonData={
                     "results": [
-                        {"title": "AstrBot", "url": "https://example.com", "content": "OK"}
+                        {
+                            "title": "AstrBot",
+                            "url": "https://example.com",
+                            "content": "OK",
+                        }
                     ]
                 },
             ),
@@ -500,7 +504,11 @@ async def test_tavily_search_key_failover_on_rate_limited_429(
                 status=200,
                 jsonData={
                     "results": [
-                        {"title": "RateLimitOK", "url": "https://example2.com", "content": "OK"}
+                        {
+                            "title": "RateLimitOK",
+                            "url": "https://example2.com",
+                            "content": "OK",
+                        }
                     ]
                 },
             ),
@@ -740,3 +748,179 @@ async def test_exa_get_contents_raises_on_http_error(monkeypatch):
             {"websearch_exa_key": ["exa-key"]},
             {"ids": ["https://example.com"]},
         )
+
+
+# --- Grok tests ---
+
+
+def _grok_provider_settings(**overrides):
+    settings = {
+        "websearch_grok_api_base": "https://grok.example/v1/",
+        "websearch_grok_api_key": "grok-key",
+        "websearch_grok_model": "grok-search-model",
+    }
+    settings.update(overrides)
+    return settings
+
+
+@pytest.mark.asyncio
+async def test_grok_search_uses_custom_request_and_maps_all_citation_locations(
+    monkeypatch,
+):
+    session = _FakeFirecrawlSession(
+        _FakeFirecrawlResponse(
+            status=200,
+            json_data={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "AstrBot is an AI assistant framework.",
+                            "citations": [
+                                {
+                                    "url": "https://docs.example/astrbot",
+                                    "title": "AstrBot documentation",
+                                    "snippet": "Official documentation",
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "citations": [
+                    "https://github.com/AstrBotDevs/AstrBot",
+                    "https://docs.example/astrbot",
+                ],
+            },
+        )
+    )
+
+    def fake_client_session(*, trust_env):
+        session.trust_env = trust_env
+        return session
+
+    monkeypatch.setattr(tools.aiohttp, "ClientSession", fake_client_session)
+
+    summary, results = await tools._grok_search(
+        _grok_provider_settings(),
+        "What is AstrBot?",
+    )
+
+    assert session.posted == {
+        "url": "https://grok.example/v1/chat/completions",
+        "json": {
+            "model": "grok-search-model",
+            "messages": [{"role": "user", "content": "What is AstrBot?"}],
+            "search_parameters": {
+                "mode": "auto",
+                "return_citations": True,
+            },
+        },
+        "headers": {
+            "Authorization": "Bearer grok-key",
+            "Content-Type": "application/json",
+        },
+    }
+    assert session.trust_env is True
+    assert summary == "AstrBot is an AI assistant framework."
+    assert results == [
+        tools.SearchResult(
+            title="AstrBot documentation",
+            url="https://docs.example/astrbot",
+            snippet="Official documentation",
+        ),
+        tools.SearchResult(
+            title="https://github.com/AstrBotDevs/AstrBot",
+            url="https://github.com/AstrBotDevs/AstrBot",
+            snippet="",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_grok_web_search_tool_returns_summary_and_results_json(monkeypatch):
+    async def fake_grok_search(provider_settings, query):
+        assert provider_settings == _grok_provider_settings()
+        assert query == "AstrBot"
+        return (
+            "Grok summary",
+            [
+                tools.SearchResult(
+                    title="First source",
+                    url="https://example.com/first",
+                    snippet="First snippet",
+                ),
+                tools.SearchResult(
+                    title="Second source",
+                    url="https://example.com/second",
+                    snippet="Second snippet",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(tools, "_grok_search", fake_grok_search)
+    tool = tools.GrokWebSearchTool()
+    context = _context_with_provider_settings(_grok_provider_settings())
+
+    result = await tool.call(context, query="AstrBot", max_results=1)
+
+    parsed = json.loads(result)
+    assert parsed["summary"] == "Grok summary"
+    assert len(parsed["results"]) == 1
+    assert parsed["results"][0]["title"] == "First source"
+    assert parsed["results"][0]["url"] == "https://example.com/first"
+    assert parsed["results"][0]["snippet"] == "First snippet"
+    assert parsed["results"][0]["index"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("missing_setting", "expected_error"),
+    [
+        (
+            "websearch_grok_api_base",
+            "Error: Grok API base is not configured in AstrBot.",
+        ),
+        (
+            "websearch_grok_api_key",
+            "Error: Grok API key is not configured in AstrBot.",
+        ),
+        (
+            "websearch_grok_model",
+            "Error: Grok model is not configured in AstrBot.",
+        ),
+    ],
+)
+async def test_grok_web_search_tool_reports_missing_configuration(
+    missing_setting,
+    expected_error,
+):
+    settings = _grok_provider_settings()
+    settings[missing_setting] = ""
+    tool = tools.GrokWebSearchTool()
+    context = _context_with_provider_settings(settings)
+
+    result = await tool.call(context, query="AstrBot")
+
+    assert result == expected_error
+
+
+@pytest.mark.asyncio
+async def test_grok_search_raises_on_http_error(monkeypatch):
+    session = _FakeFirecrawlSession(
+        _FakeFirecrawlResponse(status=403, text_data="Forbidden")
+    )
+
+    def fake_client_session(*, trust_env):
+        session.trust_env = trust_env
+        return session
+
+    monkeypatch.setattr(tools.aiohttp, "ClientSession", fake_client_session)
+
+    with pytest.raises(
+        Exception,
+        match="Grok web search failed: Forbidden, status: 403",
+    ):
+        await tools._grok_search(_grok_provider_settings(), "AstrBot")
+
+    assert session.trust_env is True
+    assert session.entered is True
+    assert session.exited is True

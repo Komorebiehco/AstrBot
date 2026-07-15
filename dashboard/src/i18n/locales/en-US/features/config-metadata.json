@@ -143,6 +143,17 @@
         "websearch_exa_key": {
           "description": "Exa API Key",
           "hint": "Multiple keys can be added for rotation. Get a key at https://dashboard.exa.ai"
+        },
+        "websearch_grok_api_base": {
+          "description": "Grok API Base",
+          "hint": "Enter an OpenAI-compatible API base ending in /v1, for example https://api.x.ai/v1."
+        },
+        "websearch_grok_api_key": {
+          "description": "Grok API Key"
+        },
+        "websearch_grok_model": {
+          "description": "Grok Model",
+          "hint": "Enter a model with xAI web search support, for example grok-4-1-fast."
         }
       }
     },

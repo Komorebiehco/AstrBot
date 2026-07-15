@@ -145,6 +145,17 @@
         "websearch_exa_key": {
           "description": "Exa API Key",
           "hint": "可添加多个 Key 进行轮询。获取 Key: https://dashboard.exa.ai"
+        },
+        "websearch_grok_api_base": {
+          "description": "Grok API 地址",
+          "hint": "填写以 /v1 结尾的 OpenAI 兼容地址，例如 https://api.x.ai/v1。"
+        },
+        "websearch_grok_api_key": {
+          "description": "Grok API Key"
+        },
+        "websearch_grok_model": {
+          "description": "Grok 模型",
+          "hint": "填写支持 xAI 网页搜索的模型，例如 grok-4-1-fast。"
         }
       }
     },

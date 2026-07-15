@@ -116,6 +116,9 @@ DEFAULT_CONFIG = {
         "websearch_baidu_app_builder_key": "",
         "websearch_firecrawl_key": [],
         "websearch_exa_key": [],
+        "websearch_grok_api_base": "https://api.x.ai/v1",
+        "websearch_grok_api_key": "",
+        "websearch_grok_model": "",
         "web_search_link": False,
         "display_reasoning_text": False,
         "identifier": False,
@@ -3327,6 +3330,7 @@ CONFIG_METADATA_3 = {
                             "brave",
                             "firecrawl",
                             "exa",
+                            "grok",
                         ],
                         "condition": {
                             "provider_settings.web_search": True,
@@ -3388,6 +3392,32 @@ CONFIG_METADATA_3 = {
                         "hint": "可添加多个 Key 进行轮询。Get a key at https://dashboard.exa.ai",
                         "condition": {
                             "provider_settings.websearch_provider": "exa",
+                            "provider_settings.web_search": True,
+                        },
+                    },
+                    "provider_settings.websearch_grok_api_base": {
+                        "description": "Grok API Base",
+                        "type": "string",
+                        "hint": "OpenAI-compatible API base ending in /v1, for example https://api.x.ai/v1.",
+                        "condition": {
+                            "provider_settings.websearch_provider": "grok",
+                            "provider_settings.web_search": True,
+                        },
+                    },
+                    "provider_settings.websearch_grok_api_key": {
+                        "description": "Grok API Key",
+                        "type": "string",
+                        "condition": {
+                            "provider_settings.websearch_provider": "grok",
+                            "provider_settings.web_search": True,
+                        },
+                    },
+                    "provider_settings.websearch_grok_model": {
+                        "description": "Grok Model",
+                        "type": "string",
+                        "hint": "Model with xAI web search support, for example grok-4-1-fast.",
+                        "condition": {
+                            "provider_settings.websearch_provider": "grok",
                             "provider_settings.web_search": True,
                         },
                     },

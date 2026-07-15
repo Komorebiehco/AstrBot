@@ -11,6 +11,7 @@ from astrbot.core.tools.message_tools import SendMessageToUserTool
 from astrbot.core.tools.web_search_tools import (
     FirecrawlExtractWebPageTool,
     FirecrawlWebSearchTool,
+    GrokWebSearchTool,
 )
 
 
@@ -347,6 +348,15 @@ def test_firecrawl_tools_are_registered_as_builtin_tools():
     assert extract_tool.name == "firecrawl_extract_web_page"
     assert manager.is_builtin_tool("web_search_firecrawl") is True
     assert manager.is_builtin_tool("firecrawl_extract_web_page") is True
+
+
+def test_grok_tool_is_registered_as_builtin_tool():
+    manager = FunctionToolManager()
+
+    tool = manager.get_builtin_tool(GrokWebSearchTool)
+
+    assert tool.name == "web_search_grok"
+    assert manager.is_builtin_tool("web_search_grok") is True
 
 
 @pytest.mark.asyncio
