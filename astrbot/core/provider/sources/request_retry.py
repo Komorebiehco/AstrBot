@@ -56,6 +56,14 @@ def _is_retryable_provider_request_error(
     if status_code == 429 and not retry_rate_limits:
         return False
 
+    if status_code == 403:
+        error_text = str(error).lower()
+        return (
+            "<html" in error_text
+            and "403 forbidden" in error_text
+            and "nginx" in error_text
+        )
+
     return status_code in REQUEST_RETRY_STATUS_CODES or 500 <= status_code <= 599
 
 
