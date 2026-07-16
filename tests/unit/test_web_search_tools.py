@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -1023,6 +1024,53 @@ async def test_grok_web_search_tool_returns_summary_and_results_json(monkeypatch
     assert parsed["results"][0]["url"] == "https://example.com/first"
     assert parsed["results"][0]["snippet"] == "First snippet"
     assert parsed["results"][0]["index"]
+
+
+@pytest.mark.asyncio
+async def test_grok_web_search_tool_caps_calls_per_event(monkeypatch):
+    async def fake_grok_search(provider_settings, query):
+        return (
+            "Grok summary",
+            [tools.SearchResult(title="Source", url="https://example.com", snippet="")],
+        )
+
+    monkeypatch.setattr(tools, "_grok_search", fake_grok_search)
+
+    class _Event:
+        def __init__(self):
+            self.extras = {}
+
+        def get_extra(self, key, default=None):
+            return self.extras.get(key, default)
+
+        def set_extra(self, key, value):
+            self.extras[key] = value
+
+    event = _Event()
+    context = _context_with_provider_settings(_grok_provider_settings())
+    context.context.event = event
+    tool = tools.GrokWebSearchTool()
+
+    for _ in range(tools._GROK_MAX_CALLS_PER_EVENT):
+        result = await tool.call(context, query="AstrBot")
+        assert json.loads(result)["summary"] == "Grok summary"
+
+    result = await tool.call(context, query="AstrBot")
+    assert "call budget exhausted" in result
+
+
+@pytest.mark.asyncio
+async def test_grok_web_search_tool_returns_timeout_without_raising(monkeypatch):
+    async def fake_grok_search(provider_settings, query):
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(tools, "_grok_search", fake_grok_search)
+    tool = tools.GrokWebSearchTool()
+    context = _context_with_provider_settings(_grok_provider_settings())
+
+    result = await tool.call(context, query="AstrBot")
+
+    assert "timed out after" in result
 
 
 @pytest.mark.asyncio

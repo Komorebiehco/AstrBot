@@ -54,6 +54,8 @@ _GROK_WEB_SEARCH_TOOL_CONFIG = {
     "provider_settings.web_search": True,
     "provider_settings.websearch_provider": "grok",
 }
+_GROK_MAX_CALLS_PER_EVENT = 3
+_GROK_REQUEST_TIMEOUT_SECONDS = 45
 
 
 @std_dataclass
@@ -773,6 +775,7 @@ class GrokWebSearchTool(FunctionTool[AstrAgentContext]):
 
     async def call(self, context, **kwargs) -> ToolExecResult:
         _, provider_settings, _ = _get_runtime(context)
+        event = context.context.event
         required_settings = (
             (
                 "websearch_grok_api_base",
@@ -801,7 +804,31 @@ class GrokWebSearchTool(FunctionTool[AstrAgentContext]):
             max_results = 10
         max_results = min(max(max_results, 1), 20)
 
-        summary, results = await _grok_search(provider_settings, query)
+        get_extra = getattr(event, "get_extra", None)
+        set_extra = getattr(event, "set_extra", None)
+        if callable(get_extra) and callable(set_extra):
+            call_count = int(get_extra("grok_web_search_call_count", 0) or 0)
+            if call_count >= _GROK_MAX_CALLS_PER_EVENT:
+                return (
+                    "Grok web search call budget exhausted for this user message. "
+                    "Do not call web_search_grok again in this turn; synthesize the "
+                    "answer from the results already collected."
+                )
+            set_extra("grok_web_search_call_count", call_count + 1)
+
+        try:
+            summary, results = await asyncio.wait_for(
+                _grok_search(provider_settings, query),
+                timeout=_GROK_REQUEST_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return (
+                "Grok web search timed out after "
+                f"{_GROK_REQUEST_TIMEOUT_SECONDS} seconds. Do not retry this tool "
+                "in this turn; answer with the information already available."
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"Grok web search failed: {exc}"
         return _search_result_payload(results[:max_results], summary=summary)
 
 
