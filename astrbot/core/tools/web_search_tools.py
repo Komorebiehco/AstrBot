@@ -196,7 +196,7 @@ def _search_result_payload(
 
 
 def _normalize_grok_citations(*citation_groups) -> list[SearchResult]:
-    """Normalize and deduplicate citations returned by Grok-compatible APIs.
+    """Normalize and deduplicate citations returned by Grok Responses APIs.
 
     Args:
         *citation_groups: Citation values from message-level and top-level fields.
@@ -237,7 +237,7 @@ async def _grok_search(
     provider_settings: dict,
     query: str,
 ) -> tuple[str, list[SearchResult]]:
-    """Call a Grok-compatible Chat Completions endpoint with native web search.
+    """Call a Grok-compatible Responses endpoint with native web search.
 
     Args:
         provider_settings: Grok API base, API key, and model configuration.
@@ -247,7 +247,7 @@ async def _grok_search(
         The Grok-generated summary and normalized citation results.
 
     Raises:
-        ValueError: If a required Grok setting is missing.
+        ValueError: If a required setting is missing or search does not complete.
         Exception: If the Grok-compatible endpoint returns an HTTP error.
     """
     api_base = str(provider_settings.get("websearch_grok_api_base", "")).strip()
@@ -268,16 +268,13 @@ async def _grok_search(
     }
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": query}],
-        "search_parameters": {
-            "mode": "auto",
-            "return_citations": True,
-        },
+        "input": query,
+        "tools": [{"type": "web_search"}],
     }
 
     async with aiohttp.ClientSession(trust_env=True) as session:
         async with session.post(
-            f"{api_base.rstrip('/')}/chat/completions",
+            f"{api_base.rstrip('/')}/responses",
             json=payload,
             headers=headers,
         ) as response:
@@ -288,13 +285,43 @@ async def _grok_search(
                 )
             data = await response.json()
 
-    choices = data.get("choices", [])
-    message = choices[0].get("message", {}) if choices else {}
-    summary = str(message.get("content") or "")
-    results = _normalize_grok_citations(
-        message.get("citations"),
-        data.get("citations"),
-    )
+    output = data.get("output", [])
+    search_executed = False
+    summary_parts: list[str] = []
+    citations: list[dict | str] = []
+    if isinstance(output, list):
+        for output_item in output:
+            if not isinstance(output_item, dict):
+                continue
+            if output_item.get("type") == "web_search_call" and output_item.get(
+                "status"
+            ) == "completed":
+                search_executed = True
+            content = output_item.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for content_item in content:
+                if not isinstance(content_item, dict):
+                    continue
+                text = content_item.get("text")
+                if isinstance(text, str) and text.strip():
+                    summary_parts.append(text.strip())
+                annotations = content_item.get("annotations", [])
+                if isinstance(annotations, list):
+                    citations.extend(annotations)
+
+    if not search_executed:
+        raise ValueError(
+            "Grok web search did not execute. Check that the API endpoint and "
+            "model support Responses API web search."
+        )
+
+    summary = "\n".join(summary_parts)
+    results = _normalize_grok_citations(citations)
+    if not summary:
+        raise ValueError("Grok web search returned no summary.")
+    if not results:
+        raise ValueError("Grok web search returned no cited sources.")
     return summary, results
 
 

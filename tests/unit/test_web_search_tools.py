@@ -771,23 +771,47 @@ async def test_grok_search_uses_custom_request_and_maps_all_citation_locations(
         _FakeFirecrawlResponse(
             status=200,
             json_data={
-                "choices": [
+                "output": [
                     {
-                        "message": {
-                            "content": "AstrBot is an AI assistant framework.",
-                            "citations": [
-                                {
-                                    "url": "https://docs.example/astrbot",
-                                    "title": "AstrBot documentation",
-                                    "snippet": "Official documentation",
-                                }
-                            ],
-                        }
-                    }
-                ],
-                "citations": [
-                    "https://github.com/AstrBotDevs/AstrBot",
-                    "https://docs.example/astrbot",
+                        "type": "reasoning",
+                        "status": "completed",
+                    },
+                    {
+                        "type": "web_search_call",
+                        "status": "completed",
+                    },
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "AstrBot is an AI assistant framework.",
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://docs.example/astrbot",
+                                        "title": "AstrBot documentation",
+                                    },
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://github.com/AstrBotDevs/AstrBot",
+                                        "title": "AstrBot GitHub repository",
+                                    },
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://docs.example/astrbot",
+                                        "title": "Duplicate citation",
+                                    },
+                                ],
+                            },
+                            {
+                                "type": "output_text",
+                                "text": "It supports multiple platforms.",
+                                "annotations": [],
+                            },
+                        ],
+                    },
                 ],
             },
         )
@@ -805,14 +829,11 @@ async def test_grok_search_uses_custom_request_and_maps_all_citation_locations(
     )
 
     assert session.posted == {
-        "url": "https://grok.example/v1/chat/completions",
+        "url": "https://grok.example/v1/responses",
         "json": {
             "model": "grok-search-model",
-            "messages": [{"role": "user", "content": "What is AstrBot?"}],
-            "search_parameters": {
-                "mode": "auto",
-                "return_citations": True,
-            },
+            "input": "What is AstrBot?",
+            "tools": [{"type": "web_search"}],
         },
         "headers": {
             "Authorization": "Bearer grok-key",
@@ -820,19 +841,91 @@ async def test_grok_search_uses_custom_request_and_maps_all_citation_locations(
         },
     }
     assert session.trust_env is True
-    assert summary == "AstrBot is an AI assistant framework."
+    assert summary == (
+        "AstrBot is an AI assistant framework.\nIt supports multiple platforms."
+    )
     assert results == [
         tools.SearchResult(
             title="AstrBot documentation",
             url="https://docs.example/astrbot",
-            snippet="Official documentation",
+            snippet="",
         ),
         tools.SearchResult(
-            title="https://github.com/AstrBotDevs/AstrBot",
+            title="AstrBot GitHub repository",
             url="https://github.com/AstrBotDevs/AstrBot",
             snippet="",
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_grok_search_rejects_placeholder_response_without_search(monkeypatch):
+    session = _FakeFirecrawlSession(
+        _FakeFirecrawlResponse(
+            status=200,
+            json_data={
+                "output": [
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "I'll search for that now.",
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+    )
+
+    def fake_client_session(*, trust_env):
+        session.trust_env = trust_env
+        return session
+
+    monkeypatch.setattr(tools.aiohttp, "ClientSession", fake_client_session)
+
+    with pytest.raises(ValueError, match="Grok web search did not execute"):
+        await tools._grok_search(_grok_provider_settings(), "AstrBot")
+
+
+@pytest.mark.asyncio
+async def test_grok_search_rejects_response_without_citations(monkeypatch):
+    session = _FakeFirecrawlSession(
+        _FakeFirecrawlResponse(
+            status=200,
+            json_data={
+                "output": [
+                    {
+                        "type": "web_search_call",
+                        "status": "completed",
+                    },
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Search summary without sources.",
+                                "annotations": [],
+                            }
+                        ],
+                    },
+                ]
+            },
+        )
+    )
+
+    def fake_client_session(*, trust_env):
+        session.trust_env = trust_env
+        return session
+
+    monkeypatch.setattr(tools.aiohttp, "ClientSession", fake_client_session)
+
+    with pytest.raises(ValueError, match="Grok web search returned no cited sources"):
+        await tools._grok_search(_grok_provider_settings(), "AstrBot")
 
 
 @pytest.mark.asyncio
