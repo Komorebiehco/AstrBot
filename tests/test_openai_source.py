@@ -60,6 +60,39 @@ def _make_groq_provider(overrides: dict | None = None) -> ProviderGroq:
     )
 
 
+@pytest.mark.asyncio
+async def test_prepare_chat_payload_rewrites_waf_sensitive_command_only_outgoing():
+    provider = _make_provider()
+    contexts = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "shell",
+                        "arguments": '{"command":"rm -rf /tmp/repo"}',
+                    },
+                }
+            ],
+        }
+    ]
+    try:
+        payloads, context_query = await provider._prepare_chat_payload(
+            prompt=None,
+            contexts=contexts,
+        )
+
+        outgoing = str(payloads["messages"])
+        assert "rm -r -f /tmp/repo" in outgoing
+        assert "rm -rf /tmp/repo" not in outgoing
+        assert "rm -rf /tmp/repo" in str(context_query)
+        assert "rm -rf /tmp/repo" in str(contexts)
+    finally:
+        await provider.terminate()
+
+
 def test_create_http_client_uses_openai_httpx_module(monkeypatch):
     captured: dict[str, object] = {}
 
