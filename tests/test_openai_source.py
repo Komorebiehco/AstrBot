@@ -1,5 +1,6 @@
 import base64
 import builtins
+import json
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -61,7 +62,7 @@ def _make_groq_provider(overrides: dict | None = None) -> ProviderGroq:
 
 
 @pytest.mark.asyncio
-async def test_prepare_chat_payload_rewrites_waf_sensitive_command_only_outgoing():
+async def test_prepare_chat_payload_redacts_shell_command_only_outgoing():
     provider = _make_provider()
     contexts = [
         {
@@ -71,8 +72,11 @@ async def test_prepare_chat_payload_rewrites_waf_sensitive_command_only_outgoing
                     "id": "call_1",
                     "type": "function",
                     "function": {
-                        "name": "shell",
-                        "arguments": '{"command":"rm -rf /tmp/repo"}',
+                        "name": "astrbot_execute_shell",
+                        "arguments": (
+                            '{"command":"rm -rf /tmp/repo && find . | sort",'
+                            '"timeout":120}'
+                        ),
                     },
                 }
             ],
@@ -84,9 +88,32 @@ async def test_prepare_chat_payload_rewrites_waf_sensitive_command_only_outgoing
             contexts=contexts,
         )
 
-        outgoing = str(payloads["messages"])
-        assert "rm -r -f /tmp/repo" in outgoing
-        assert "rm -rf /tmp/repo" not in outgoing
+        outgoing_arguments = payloads["messages"][0]["tool_calls"][0]["function"][
+            "arguments"
+        ]
+        outgoing_data = json.loads(outgoing_arguments)
+        assert outgoing_data == {
+            "command": "[Shell command omitted from provider history after execution.]",
+            "timeout": 120,
+        }
+        assert "rm -rf /tmp/repo" in str(context_query)
+        assert "rm -rf /tmp/repo" in str(contexts)
+    finally:
+        await provider.terminate()
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_payload_rewrites_waf_sensitive_text_only_outgoing():
+    provider = _make_provider()
+    contexts = [{"role": "user", "content": "Explain rm -rf /tmp/repo safely."}]
+    try:
+        payloads, context_query = await provider._prepare_chat_payload(
+            prompt=None,
+            contexts=contexts,
+        )
+
+        assert "rm -r -f /tmp/repo" in str(payloads["messages"])
+        assert "rm -rf /tmp/repo" not in str(payloads["messages"])
         assert "rm -rf /tmp/repo" in str(context_query)
         assert "rm -rf /tmp/repo" in str(contexts)
     finally:

@@ -988,14 +988,60 @@ class ProviderOpenAIOfficial(Provider):
         self._finally_convert_payload(payloads)
 
         messages_json = json.dumps(payloads["messages"], ensure_ascii=False)
+        sanitized_messages = json.loads(messages_json)
+        redacted_shell_command = False
+        for message in sanitized_messages:
+            if not isinstance(message, dict):
+                continue
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function")
+                if not isinstance(function, dict) or function.get("name") not in {
+                    "astrbot_execute_shell",
+                    "shell",
+                }:
+                    continue
+                arguments = function.get("arguments")
+                try:
+                    arguments_data = (
+                        json.loads(arguments)
+                        if isinstance(arguments, str)
+                        else dict(arguments)
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    arguments_data = {}
+                if "command" not in arguments_data and not isinstance(arguments, str):
+                    continue
+                arguments_data["command"] = (
+                    "[Shell command omitted from provider history after execution.]"
+                )
+                function["arguments"] = json.dumps(
+                    arguments_data,
+                    ensure_ascii=False,
+                )
+                redacted_shell_command = True
+
+        sanitized_messages_json = json.dumps(
+            sanitized_messages,
+            ensure_ascii=False,
+        )
         sanitized_messages_json = re.sub(
             r"(?<![\w-])rm\s+-rf(?!\w)",
             "rm -r -f",
-            messages_json,
+            sanitized_messages_json,
         )
         if sanitized_messages_json != messages_json:
-            # Some nginx WAFs block this compact flag spelling even in tool history.
             payloads["messages"] = json.loads(sanitized_messages_json)
+        if redacted_shell_command:
+            logger.warning(
+                "Redacted a shell command from the outgoing OpenAI tool history."
+            )
+        elif sanitized_messages_json != messages_json:
+            # Some nginx WAFs block this compact flag spelling even in tool history.
             logger.warning(
                 "Rewrote a WAF-sensitive command pattern in the outgoing "
                 "OpenAI payload."
