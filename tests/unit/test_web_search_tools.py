@@ -929,6 +929,67 @@ async def test_grok_search_rejects_response_without_citations(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_grok_search_limits_waf_sensitive_summary_content(monkeypatch):
+    session = _FakeFirecrawlSession(
+        _FakeFirecrawlResponse(
+            status=200,
+            json_data={
+                "output": [
+                    {
+                        "type": "web_search_call",
+                        "status": "completed",
+                    },
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": (
+                                    "Deployment details.\n"
+                                    "```bash\nrm -rf /tmp/example\n```\n"
+                                    + "A" * 1400
+                                ),
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://example.com/deployment",
+                                        "title": "Deployment guide",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ]
+            },
+        )
+    )
+
+    def fake_client_session(*, trust_env):
+        session.trust_env = trust_env
+        return session
+
+    monkeypatch.setattr(tools.aiohttp, "ClientSession", fake_client_session)
+
+    summary, results = await tools._grok_search(
+        _grok_provider_settings(),
+        "Deployment requirements",
+    )
+
+    assert "rm -rf" not in summary
+    assert "[Executable code example omitted; see cited source.]" in summary
+    assert summary.endswith("[Summary truncated; see cited sources.]")
+    assert len(summary) < 1300
+    assert results == [
+        tools.SearchResult(
+            title="Deployment guide",
+            url="https://example.com/deployment",
+            snippet="",
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_grok_web_search_tool_returns_summary_and_results_json(monkeypatch):
     async def fake_grok_search(provider_settings, query):
         assert provider_settings == _grok_provider_settings()

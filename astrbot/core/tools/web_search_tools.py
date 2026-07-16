@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import uuid
 from dataclasses import dataclass as std_dataclass
 from dataclasses import field
@@ -317,6 +318,17 @@ async def _grok_search(
         )
 
     summary = "\n".join(summary_parts)
+    summary = re.sub(
+        r"```.*?```",
+        "[Executable code example omitted; see cited source.]",
+        summary,
+        flags=re.DOTALL,
+    )
+    if len(summary) > 1200:
+        summary = (
+            f"{summary[:1200].rstrip()}...\n"
+            "[Summary truncated; see cited sources.]"
+        )
     results = _normalize_grok_citations(citations)
     if not summary:
         raise ValueError("Grok web search returned no summary.")
