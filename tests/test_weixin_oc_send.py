@@ -1,3 +1,5 @@
+import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +15,8 @@ def _make_adapter(*responses: dict) -> WeixinOCAdapter:
     adapter.account_id = "account"
     adapter.metadata = SimpleNamespace(id="weixin-test")
     adapter._context_tokens = {"user": "context-token"}
+    adapter._sendmessage_lock = asyncio.Lock()
+    adapter._last_sendmessage_request_at = 0.0
     adapter.client = SimpleNamespace(
         request_json=AsyncMock(side_effect=list(responses)),
     )
@@ -80,3 +84,48 @@ async def test_sendmessage_does_not_retry_non_transient_error(monkeypatch):
     adapter.client.request_json.assert_awaited_once()
     sleep.assert_not_awaited()
     adapter._cache_recent_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sendmessage_serializes_concurrent_calls_and_spaces_requests():
+    adapter = _make_adapter()
+    adapter.SENDMESSAGE_MIN_INTERVAL_S = 0.05
+    first_request_started = asyncio.Event()
+    release_first_request = asyncio.Event()
+    active_requests = 0
+    max_active_requests = 0
+    request_started_at: list[float] = []
+
+    async def _request_json(*_args, **_kwargs):
+        nonlocal active_requests, max_active_requests
+        active_requests += 1
+        max_active_requests = max(max_active_requests, active_requests)
+        request_started_at.append(time.monotonic())
+        if len(request_started_at) == 1:
+            first_request_started.set()
+            await release_first_request.wait()
+        active_requests -= 1
+        return {"ret": 0, "errcode": 0}
+
+    adapter.client.request_json = AsyncMock(side_effect=_request_json)
+    first = asyncio.create_task(
+        adapter._send_items_to_session(
+            "user",
+            [adapter._build_plain_text_item("first")],
+        )
+    )
+    await first_request_started.wait()
+    second = asyncio.create_task(
+        adapter._send_items_to_session(
+            "user",
+            [adapter._build_plain_text_item("second")],
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert adapter.client.request_json.await_count == 1
+    release_first_request.set()
+    assert await asyncio.gather(first, second) == [True, True]
+    assert max_active_requests == 1
+    assert len(request_started_at) == 2
+    assert request_started_at[1] - request_started_at[0] >= 0.045
