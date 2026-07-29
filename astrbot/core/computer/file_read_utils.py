@@ -28,6 +28,9 @@ from .booters.base import ComputerBooter
 _MAX_FILE_READ_BYTES = 128 * 1024
 _MAX_FILE_READ_TOKENS = 25_000
 _MAX_TEXT_FILE_FULL_READ_BYTES = 256 * 1024
+_MAX_SCANNED_PDF_RENDER_PAGES = 4
+_SCANNED_PDF_RENDER_SCALE = 2.0
+_SCANNED_PDF_RENDER_MAX_SIZE = 2048
 _FILE_SNIFF_BYTES = 512
 _TOKEN_COUNTER = EstimateTokenCounter()
 _TEXT_ENCODINGS = (
@@ -52,6 +55,28 @@ _ZIP_MAGIC_PREFIXES = (
     b"PK\x03\x04",
     b"PK\x05\x06",
     b"PK\x07\x08",
+)
+_ARCHIVE_MAGIC_PREFIXES = (
+    b"\x1f\x8b",
+    b"BZh",
+    b"\xfd7zXZ\x00",
+    b"7z\xbc\xaf\x27\x1c",
+    b"Rar!\x1a\x07",
+)
+_ARCHIVE_SUFFIXES = (
+    ".zip",
+    ".7z",
+    ".rar",
+    ".tar",
+    ".tar.gz",
+    ".tgz",
+    ".gz",
+    ".tar.bz2",
+    ".tbz2",
+    ".bz2",
+    ".tar.xz",
+    ".txz",
+    ".xz",
 )
 _BINARY_MAGIC_PREFIXES = (
     b"%PDF-",
@@ -299,7 +324,11 @@ async def _read_local_file_bytes(path: str) -> bytes:
     return await to_thread(Path(path).read_bytes)
 
 
-async def _compress_image_bytes_to_base64(data: bytes) -> dict[str, str | int]:
+async def _compress_image_bytes_to_base64(
+    data: bytes,
+    *,
+    max_size: int = IMAGE_COMPRESS_DEFAULT_MAX_SIZE,
+) -> dict[str, str | int]:
     def _run() -> dict[str, str | int]:
         temp_dir = Path(get_astrbot_temp_path())
         temp_dir.mkdir(parents=True, exist_ok=True)
@@ -307,7 +336,7 @@ async def _compress_image_bytes_to_base64(data: bytes) -> dict[str, str | int]:
             _compress_image_sync(
                 data,
                 temp_dir,
-                IMAGE_COMPRESS_DEFAULT_MAX_SIZE,
+                max_size,
                 IMAGE_COMPRESS_DEFAULT_QUALITY,
                 IMAGE_COMPRESS_DEFAULT_OPTIMIZE,
             )
@@ -358,6 +387,15 @@ def _looks_like_zip_container(sample: bytes) -> bool:
     return any(sample.startswith(prefix) for prefix in _ZIP_MAGIC_PREFIXES)
 
 
+def _looks_like_archive(path: str, sample: bytes) -> bool:
+    file_name = Path(path).name.lower()
+    return (
+        _looks_like_zip_container(sample)
+        or any(sample.startswith(prefix) for prefix in _ARCHIVE_MAGIC_PREFIXES)
+        or any(file_name.endswith(suffix) for suffix in _ARCHIVE_SUFFIXES)
+    )
+
+
 def _is_docx_bytes(file_bytes: bytes) -> bool:
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
@@ -397,6 +435,89 @@ async def _parse_local_pdf_text(file_bytes: bytes, file_name: str) -> str:
 
     result = await PDFParser().parse(file_bytes, file_name)
     return result.text
+
+
+async def _render_local_scanned_pdf_pages(
+    file_bytes: bytes,
+    *,
+    offset: int | None,
+    limit: int | None,
+) -> ToolExecResult:
+    """Render a bounded page range from a scanned PDF for vision models.
+
+    Args:
+        file_bytes: Original PDF bytes.
+        offset: Zero-based page offset. Defaults to the first page.
+        limit: Requested page count. It is capped to protect memory and context size.
+
+    Returns:
+        A tool result containing page metadata and compressed page images.
+    """
+
+    page_offset = offset or 0
+    page_limit = min(limit or 1, _MAX_SCANNED_PDF_RENDER_PAGES)
+
+    def _render() -> tuple[int, list[tuple[int, bytes]]]:
+        import pymupdf
+
+        document = pymupdf.open(stream=file_bytes, filetype="pdf")
+        try:
+            page_count = document.page_count
+            end = min(page_offset + page_limit, page_count)
+            rendered = []
+            matrix = pymupdf.Matrix(
+                _SCANNED_PDF_RENDER_SCALE,
+                _SCANNED_PDF_RENDER_SCALE,
+            )
+            for page_index in range(page_offset, end):
+                pixmap = document.load_page(page_index).get_pixmap(
+                    matrix=matrix,
+                    alpha=False,
+                )
+                rendered.append((page_index, pixmap.tobytes("png")))
+            return page_count, rendered
+        finally:
+            document.close()
+
+    page_count, rendered_pages = await to_thread(_render)
+    if page_offset >= page_count:
+        return (
+            f"Scanned PDF page offset {page_offset} is outside the document "
+            f"(total pages: {page_count})."
+        )
+
+    last_page = rendered_pages[-1][0] + 1
+    content: list[mcp.types.TextContent | mcp.types.ImageContent] = [
+        mcp.types.TextContent(
+            type="text",
+            text=(
+                "The PDF has no extractable text, so its scanned pages were "
+                f"rendered for visual analysis. Showing pages {page_offset + 1}-"
+                f"{last_page} of {page_count}. To continue, call this tool again "
+                f"with offset={last_page} and limit up to "
+                f"{_MAX_SCANNED_PDF_RENDER_PAGES}."
+            ),
+        )
+    ]
+    for page_index, page_bytes in rendered_pages:
+        compressed = await _compress_image_bytes_to_base64(
+            page_bytes,
+            max_size=_SCANNED_PDF_RENDER_MAX_SIZE,
+        )
+        content.append(
+            mcp.types.TextContent(
+                type="text",
+                text=f"Scanned PDF page {page_index + 1} of {page_count}",
+            )
+        )
+        content.append(
+            mcp.types.ImageContent(
+                type="image",
+                data=str(compressed.get("base64", "")),
+                mimeType=str(compressed.get("mime_type", "") or "image/jpeg"),
+            )
+        )
+    return mcp.types.CallToolResult(content=content)
 
 
 async def _parse_local_epub_text(file_bytes: bytes, file_name: str) -> str:
@@ -671,6 +792,15 @@ async def read_file_tool_result(
             return f"Error reading file: failed to parse document: {exc}"
 
         if parsed_document is not None:
+            if parsed_document.kind == "pdf" and not parsed_document.text.strip():
+                try:
+                    return await _render_local_scanned_pdf_pages(
+                        parsed_document.file_bytes,
+                        offset=offset,
+                        limit=limit,
+                    )
+                except Exception as exc:
+                    return f"Error reading file: failed to render scanned PDF: {exc}"
             return await _read_local_supported_document_result(
                 path=path,
                 parsed_document=parsed_document,
@@ -678,6 +808,15 @@ async def read_file_tool_result(
                 offset=offset,
                 limit=limit,
             )
+
+    if _looks_like_archive(path, sample):
+        return (
+            "Archive detected. Use `astrbot_execute_shell` to inspect it with "
+            "`7z l <archive>` before extracting it into a dedicated workspace "
+            "directory with `7z x <archive> -o<directory>`. Then read the "
+            "extracted files with this tool. ZIP, 7z, RAR, TAR, GZip, BZip2, "
+            "and XZ are available in the local runtime."
+        )
 
     if probe.kind == "binary":
         return "Error reading file: binary files are not supported by this tool."

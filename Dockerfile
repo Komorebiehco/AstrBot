@@ -13,14 +13,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ffmpeg \
     libavcodec-extra \
+    file \
+    poppler-utils \
+    p7zip-full \
+    unzip \
+    unrar-free \
     curl \
     gnupg \
     git \
     ripgrep \
     && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    && apt-get clean
 
 RUN python -m pip install uv \
     && echo "3.12" > .python-version \

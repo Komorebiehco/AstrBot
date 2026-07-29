@@ -54,6 +54,7 @@ dependencies = [
   "audioop-lts ; python_full_version >= '3.13'",
   "click>=8.2.1",
   "pypdf>=6.1.1",
+  "pymupdf>=1.26.0,<2",
   "aiofiles>=25.1.0",
   "rank-bm25>=0.2.2",
   "jieba>=0.42.1",

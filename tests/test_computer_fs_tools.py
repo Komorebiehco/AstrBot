@@ -514,6 +514,113 @@ async def test_file_read_tool_reads_pdf_via_parser(
 
 
 @pytest.mark.asyncio
+async def test_file_read_tool_renders_scanned_pdf_for_vision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    workspace = _setup_local_fs_tools(monkeypatch, tmp_path)
+    pdf_path = workspace / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\nfake\n")
+
+    async def _fake_parse_pdf(_file_bytes: bytes, _file_name: str) -> str:
+        return ""
+
+    expected = CallToolResult(
+        content=[ImageContent(type="image", data="aW1hZ2U=", mimeType="image/jpeg")]
+    )
+    render = AsyncMock(return_value=expected)
+    monkeypatch.setattr(file_read_utils, "_parse_local_pdf_text", _fake_parse_pdf)
+    monkeypatch.setattr(file_read_utils, "_render_local_scanned_pdf_pages", render)
+
+    result = await fs_tools.FileReadTool().call(
+        _make_context(),
+        path="scan.pdf",
+        offset=2,
+        limit=3,
+    )
+
+    assert result is expected
+    render.assert_awaited_once()
+    assert render.await_args.kwargs["offset"] == 2
+    assert render.await_args.kwargs["limit"] == 3
+
+
+@pytest.mark.asyncio
+async def test_scanned_pdf_renderer_returns_real_page_image(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import pymupdf
+
+    document = pymupdf.open()
+    page = document.new_page(width=240, height=160)
+    page.draw_rect(
+        pymupdf.Rect(20, 20, 220, 140),
+        color=(0, 0, 0),
+        fill=(0, 0, 0),
+    )
+    pdf_bytes = document.tobytes()
+    document.close()
+
+    compress = AsyncMock(return_value={"base64": "aW1hZ2U=", "mime_type": "image/jpeg"})
+    monkeypatch.setattr(
+        file_read_utils,
+        "_compress_image_bytes_to_base64",
+        compress,
+    )
+
+    result = await file_read_utils._render_local_scanned_pdf_pages(
+        pdf_bytes,
+        offset=0,
+        limit=1,
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert len(result.content) == 3
+    assert isinstance(result.content[-1], ImageContent)
+    assert result.content[-1].data == "aW1hZ2U="
+    compress.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_file_read_tool_guides_archive_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    workspace = _setup_local_fs_tools(monkeypatch, tmp_path)
+    archive_path = workspace / "files.zip"
+    with zipfile.ZipFile(archive_path, mode="w") as archive:
+        archive.writestr("README.txt", "hello")
+
+    result = await fs_tools.FileReadTool().call(
+        _make_context(),
+        path="files.zip",
+    )
+
+    assert "Archive detected" in result
+    assert "7z l" in result
+    assert "dedicated workspace directory" in result
+
+
+@pytest.mark.asyncio
+async def test_file_read_tool_detects_xz_archive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    workspace = _setup_local_fs_tools(monkeypatch, tmp_path)
+    archive_path = workspace / "files.tar.xz"
+    archive_path.write_bytes(b"\xfd7zXZ\x00fake")
+
+    result = await fs_tools.FileReadTool().call(
+        _make_context(),
+        path="files.tar.xz",
+    )
+
+    assert "Archive detected" in result
+    assert "BZip2" in result
+    assert "XZ" in result
+
+
+@pytest.mark.asyncio
 async def test_file_read_tool_reads_docx_via_parser_and_magic(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

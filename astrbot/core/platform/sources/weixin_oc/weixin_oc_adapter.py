@@ -102,6 +102,7 @@ class WeixinOCReplyMeta:
 )
 class WeixinOCAdapter(Platform):
     SESSION_TIMEOUT_ERRCODE = -14
+    SENDMESSAGE_RETRY_DELAYS_S = (1.5, 3.0)
     IMAGE_ITEM_TYPE = 2
     VOICE_ITEM_TYPE = 3
     FILE_ITEM_TYPE = 4
@@ -891,34 +892,52 @@ class WeixinOCAdapter(Platform):
                 user_id,
             )
             return False
-        payload = await self.client.request_json(
-            "POST",
-            "ilink/bot/sendmessage",
-            payload={
-                "base_info": {
-                    "channel_version": "astrbot",
-                },
-                "msg": {
-                    "from_user_id": "",
-                    "to_user_id": user_id,
-                    "client_id": uuid.uuid4().hex,
-                    "message_type": 2,
-                    "message_state": 2,
-                    "context_token": context_token,
-                    "item_list": item_list,
-                },
+        request_payload = {
+            "base_info": {
+                "channel_version": "astrbot",
             },
-            token_required=True,
-            headers={},
-        )
-        if not self._is_successful_api_payload(payload):
+            "msg": {
+                "from_user_id": "",
+                "to_user_id": user_id,
+                "client_id": uuid.uuid4().hex,
+                "message_type": 2,
+                "message_state": 2,
+                "context_token": context_token,
+                "item_list": item_list,
+            },
+        }
+        for attempt in range(len(self.SENDMESSAGE_RETRY_DELAYS_S) + 1):
+            response_payload = await self.client.request_json(
+                "POST",
+                "ilink/bot/sendmessage",
+                payload=request_payload,
+                token_required=True,
+                headers={},
+            )
+            if self._is_successful_api_payload(response_payload):
+                break
+
+            ret = int(response_payload.get("ret") or 0)
+            if ret != -2 or attempt >= len(self.SENDMESSAGE_RETRY_DELAYS_S):
+                logger.warning(
+                    "weixin_oc(%s): sendmessage failed for %s: %s",
+                    self.meta().id,
+                    user_id,
+                    self._format_api_error(response_payload),
+                )
+                return False
+
+            delay = self.SENDMESSAGE_RETRY_DELAYS_S[attempt]
             logger.warning(
-                "weixin_oc(%s): sendmessage failed for %s: %s",
+                "weixin_oc(%s): transient sendmessage failure for %s: %s; retrying in %.1fs (%d/%d)",
                 self.meta().id,
                 user_id,
-                self._format_api_error(payload),
+                self._format_api_error(response_payload),
+                delay,
+                attempt + 2,
+                len(self.SENDMESSAGE_RETRY_DELAYS_S) + 1,
             )
-            return False
+            await asyncio.sleep(delay)
         resolved_cache_components = (
             list(cache_components)
             if cache_components is not None

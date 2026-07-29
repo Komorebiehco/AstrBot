@@ -296,7 +296,12 @@ def _decode_escaped_text(value: str) -> str:
 @dataclass
 class FileReadTool(FunctionTool):
     name: str = "astrbot_file_read_tool"
-    description: str = "read file content. Supports text, image, and PDF (text extraction), docx and epub files."
+    description: str = (
+        "Read file content. Supports text, images, PDF text extraction, scanned "
+        "PDF page rendering for vision models, docx, and epub. For ZIP, 7z, "
+        "RAR, TAR, GZip, BZip2, or XZ archives, inspect and extract them with "
+        "astrbot_execute_shell and then read the extracted files."
+    )
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
@@ -307,12 +312,12 @@ class FileReadTool(FunctionTool):
                 },
                 "offset": {
                     "type": "integer",
-                    "description": "Optional line offset to start reading from. 0-based index.",
+                    "description": "Optional line offset. For scanned PDFs, this is the zero-based page offset.",
                     "minimum": 0,
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Optional maximum number of lines to read.",
+                    "description": "Optional maximum lines. For scanned PDFs, this is the page count and is capped at 4.",
                     "minimum": 1,
                 },
             },
