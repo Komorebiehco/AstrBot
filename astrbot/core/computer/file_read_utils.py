@@ -141,7 +141,7 @@ start = {start_expr}
 limit = {limit_expr}
 end = None if limit is None else start + limit
 lines = []
-with path.open("r", encoding={encoding!r}, newline="") as file_obj:
+with path.open("r", encoding={encoding!r}, newline=None) as file_obj:
     for index, line in enumerate(file_obj):
         if index < start:
             continue
@@ -239,7 +239,7 @@ def read_local_text_range_sync(
     lines: list[str] = []
     start = 0 if offset is None else offset
     end = None if limit is None else start + limit
-    with open(path, encoding=encoding, newline="") as file_obj:
+    with open(path, encoding=encoding, newline=None) as file_obj:
         for index, line in enumerate(file_obj):
             if index < start:
                 continue

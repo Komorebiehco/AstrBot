@@ -296,9 +296,10 @@ async def _grok_search(
         for output_item in output:
             if not isinstance(output_item, dict):
                 continue
-            if output_item.get("type") == "web_search_call" and output_item.get(
-                "status"
-            ) == "completed":
+            if (
+                output_item.get("type") == "web_search_call"
+                and output_item.get("status") == "completed"
+            ):
                 search_executed = True
             content = output_item.get("content", [])
             if not isinstance(content, list):
@@ -328,8 +329,7 @@ async def _grok_search(
     )
     if len(summary) > 1200:
         summary = (
-            f"{summary[:1200].rstrip()}...\n"
-            "[Summary truncated; see cited sources.]"
+            f"{summary[:1200].rstrip()}...\n[Summary truncated; see cited sources.]"
         )
     results = _normalize_grok_citations(citations)
     if not summary:
@@ -901,13 +901,17 @@ class TavilyWebSearchTool(FunctionTool[AstrAgentContext]):
         if topic == "news":
             payload["days"] = kwargs.get("days", 3)
 
-        time_range = kwargs.get("time_range", "")
-        if time_range in ["day", "week", "month", "year"]:
-            payload["time_range"] = time_range
-        if kwargs.get("start_date"):
-            payload["start_date"] = kwargs["start_date"]
-        if kwargs.get("end_date"):
-            payload["end_date"] = kwargs["end_date"]
+        start_date = str(kwargs.get("start_date") or "").strip()
+        end_date = str(kwargs.get("end_date") or "").strip()
+        if start_date or end_date:
+            if start_date:
+                payload["start_date"] = start_date
+            if end_date:
+                payload["end_date"] = end_date
+        else:
+            time_range = kwargs.get("time_range", "")
+            if time_range in ["day", "week", "month", "year"]:
+                payload["time_range"] = time_range
 
         results = await _tavily_search(provider_settings, payload)
         if not results:

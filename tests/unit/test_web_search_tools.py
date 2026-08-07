@@ -616,6 +616,71 @@ def _context_with_provider_settings(provider_settings):
     return SimpleNamespace(context=agent_context)
 
 
+# --- Tavily tool tests ---
+
+
+@pytest.mark.parametrize(
+    ("date_filters", "expected_filters"),
+    [
+        ({"time_range": "week"}, {"time_range": "week"}),
+        (
+            {"time_range": "week", "start_date": "2026-05-10"},
+            {"start_date": "2026-05-10"},
+        ),
+        (
+            {"time_range": "week", "end_date": "2026-05-11"},
+            {"end_date": "2026-05-11"},
+        ),
+        (
+            {
+                "time_range": "week",
+                "start_date": "2026-05-10",
+                "end_date": "2026-05-11",
+            },
+            {"start_date": "2026-05-10", "end_date": "2026-05-11"},
+        ),
+        (
+            {"time_range": "week", "start_date": "", "end_date": ""},
+            {"time_range": "week"},
+        ),
+        (
+            {"time_range": "week", "start_date": "   ", "end_date": "\t"},
+            {"time_range": "week"},
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_tavily_search_tool_normalizes_date_filters(
+    monkeypatch,
+    date_filters,
+    expected_filters,
+):
+    captured_payload = {}
+
+    async def fake_tavily_search(provider_settings, payload):
+        captured_payload.update(payload)
+        return [
+            tools.SearchResult(
+                title="AstrBot",
+                url="https://example.com",
+                snippet="Search result",
+            )
+        ]
+
+    monkeypatch.setattr(tools, "_tavily_search", fake_tavily_search)
+    tool = tools.TavilyWebSearchTool()
+    context = _context_with_provider_settings({"websearch_tavily_key": ["tavily-key"]})
+
+    await tool.call(context, query="AstrBot", **date_filters)
+
+    actual_filters = {
+        key: captured_payload[key]
+        for key in ("time_range", "start_date", "end_date")
+        if key in captured_payload
+    }
+    assert actual_filters == expected_filters
+
+
 # --- Exa tests ---
 
 
@@ -948,8 +1013,7 @@ async def test_grok_search_limits_waf_sensitive_summary_content(monkeypatch):
                                 "type": "output_text",
                                 "text": (
                                     "Deployment details.\n"
-                                    "```bash\nrm -rf /tmp/example\n```\n"
-                                    + "A" * 1400
+                                    "```bash\nrm -rf /tmp/example\n```\n" + "A" * 1400
                                 ),
                                 "annotations": [
                                     {
@@ -1039,6 +1103,7 @@ async def test_grok_web_search_tool_caps_calls_per_event(monkeypatch):
     class _Event:
         def __init__(self):
             self.extras = {}
+            self.unified_msg_origin = "webchat:test"
 
         def get_extra(self, key, default=None):
             return self.extras.get(key, default)
