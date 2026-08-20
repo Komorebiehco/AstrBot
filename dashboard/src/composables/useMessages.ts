@@ -282,6 +282,27 @@ export function useMessages(options: UseMessagesOptions) {
     }
   }
 
+  async function resumeActiveRuns(
+    sessionId: string,
+    botRecord?: ChatRecord,
+  ) {
+    if (!sessionId || isSessionRunning(sessionId)) return;
+    try {
+      const response = await chatApi.getSession(sessionId);
+      const payload = response.data?.data || {};
+      if (Array.isArray(payload.active_runs)) {
+        const run = payload.active_runs[0] as ActiveChatRun | undefined;
+        if (run?.run_id && botRecord) {
+          startResumeStream(sessionId, run.run_id, botRecord);
+          return;
+        }
+        await restoreNextActiveRun(sessionId, payload.active_runs);
+      }
+    } catch (error) {
+      console.error("Failed to refresh active chat runs:", error);
+    }
+  }
+
   async function restoreNextActiveRun(
     sessionId: string,
     activeRuns: ActiveChatRun[],
@@ -562,17 +583,26 @@ export function useMessages(options: UseMessagesOptions) {
     await chatApi.stopSession(sessionId);
   }
 
-  function cleanupConnections() {
-    Object.values(activeConnections).forEach((connection) => {
-      connection.abort?.abort();
-    });
-    Object.values(chatWebSockets).forEach(closeTrackedWebSocket);
-    Object.keys(activeConnections).forEach((messageId) => {
+  function cleanupConnections(sessionId?: string) {
+    const connections = Object.entries(activeConnections).filter(
+      ([, connection]) => !sessionId || connection.sessionId === sessionId,
+    );
+    for (const [messageId] of connections) {
       delete activeConnections[messageId];
-    });
-    Object.keys(chatWebSockets).forEach((sessionId) => {
-      delete chatWebSockets[sessionId];
-    });
+    }
+    for (const [, connection] of connections) {
+      connection.abort?.abort();
+    }
+
+    const socketSessionIds = sessionId
+      ? [sessionId]
+      : Object.keys(chatWebSockets);
+    for (const socketSessionId of socketSessionIds) {
+      const ws = chatWebSockets[socketSessionId];
+      if (!ws) continue;
+      delete chatWebSockets[socketSessionId];
+      closeTrackedWebSocket(ws);
+    }
   }
 
   function normalizeHistoryRecord(record: any): ChatRecord {
@@ -625,6 +655,8 @@ export function useMessages(options: UseMessagesOptions) {
     llmCheckpointId: string | null = null,
   ) {
     const abort = new AbortController();
+    let receivedEnd = false;
+    let streamStarted = false;
     const connection: ActiveConnection = {
       sessionId,
       messageId,
@@ -658,21 +690,32 @@ export function useMessages(options: UseMessagesOptions) {
           throw new Error(`SSE connection failed: ${response.status}`);
         }
         await readSseStream(response.body, (payload) => {
+          const payloadType = payload?.type || payload?.t;
+          if (payloadType === "run_started") streamStarted = true;
+          if (payloadType === "end") receivedEnd = true;
           processStreamPayload(botRecord, payload, userRecord, connection);
           options.onStreamUpdate?.(sessionId);
         });
       })
       .catch((error) => {
         if (abort.signal.aborted) return;
-        ensureBotRecordVisible(connection);
-        appendPlain(botRecord, `\n\n${String(error?.message || error)}`);
-        console.error("SSE chat failed:", error);
+        if (!streamStarted && !connection.runId) {
+          ensureBotRecordVisible(connection);
+          appendPlain(botRecord, `\n\n${String(error?.message || error)}`);
+        }
+        console.error("SSE chat failed; attempting to resume:", error);
       })
       .finally(async () => {
-        if (activeConnections[messageId]?.abort === abort) {
-          delete activeConnections[messageId];
-          await options.onSessionsChanged?.();
+        if (activeConnections[messageId]?.abort !== abort) return;
+        delete activeConnections[messageId];
+        if (!receivedEnd && !abort.signal.aborted) {
+          if (connection.runId) {
+            startResumeStream(sessionId, connection.runId, botRecord);
+          } else {
+            await resumeActiveRuns(sessionId, botRecord);
+          }
         }
+        await options.onSessionsChanged?.();
       });
   }
 
@@ -841,6 +884,7 @@ export function useMessages(options: UseMessagesOptions) {
       }
 
       const connections = getWebSocketConnections(sessionId, ws);
+      let unresolvedBotRecord: ChatRecord | undefined;
       for (const connection of connections) {
         if (
           !connection.completed &&
@@ -848,10 +892,25 @@ export function useMessages(options: UseMessagesOptions) {
           !closingChatWebSockets.has(ws) &&
           connection.botRecord
         ) {
-          ensureBotRecordVisible(connection);
-          appendPlain(connection.botRecord, "\n\nWebSocket connection closed.");
+          if (!connection.runId) {
+            console.error("WebSocket chat disconnected; attempting to resume.");
+          }
         }
         delete activeConnections[connection.messageId];
+        if (
+          !connection.completed &&
+          !closingChatWebSockets.has(ws) &&
+          connection.botRecord
+        ) {
+          if (connection.runId) {
+            startResumeStream(sessionId, connection.runId, connection.botRecord);
+          } else {
+            unresolvedBotRecord ||= connection.botRecord;
+          }
+        }
+      }
+      if (unresolvedBotRecord && !isSessionRunning(sessionId)) {
+        void resumeActiveRuns(sessionId, unresolvedBotRecord);
       }
       if (connections.length) await options.onSessionsChanged?.();
     };

@@ -802,6 +802,7 @@ const {
   continueEditedMessage,
   regenerateMessage,
   stopSession,
+  cleanupConnections,
 } = useMessages({
   currentSessionId: currSessionId,
   onSessionsChanged: getSessions,
@@ -1333,6 +1334,9 @@ async function selectSession(sessionId: string, pushRoute = true) {
   }
   if (!loadedSessions[sessionId]) {
     await loadSessionMessages(sessionId);
+  } else {
+    cleanupConnections(sessionId);
+    await loadSessionMessages(sessionId, true, false);
   }
   scrollToBottom();
   closeMobileSidebar();
