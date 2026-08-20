@@ -285,8 +285,8 @@ export function useMessages(options: UseMessagesOptions) {
   async function resumeActiveRuns(
     sessionId: string,
     botRecord?: ChatRecord,
-  ) {
-    if (!sessionId || isSessionRunning(sessionId)) return;
+  ): Promise<boolean> {
+    if (!sessionId || isSessionRunning(sessionId)) return true;
     try {
       const response = await chatApi.getSession(sessionId);
       const payload = response.data?.data || {};
@@ -294,12 +294,17 @@ export function useMessages(options: UseMessagesOptions) {
         const run = payload.active_runs[0] as ActiveChatRun | undefined;
         if (run?.run_id && botRecord) {
           startResumeStream(sessionId, run.run_id, botRecord);
-          return;
+          return true;
         }
-        await restoreNextActiveRun(sessionId, payload.active_runs);
+        if (run?.run_id) {
+          await restoreNextActiveRun(sessionId, payload.active_runs);
+          return true;
+        }
       }
+      return false;
     } catch (error) {
       console.error("Failed to refresh active chat runs:", error);
+      return false;
     }
   }
 
@@ -657,6 +662,7 @@ export function useMessages(options: UseMessagesOptions) {
     const abort = new AbortController();
     let receivedEnd = false;
     let streamStarted = false;
+    let lastError: unknown = null;
     const connection: ActiveConnection = {
       sessionId,
       messageId,
@@ -699,10 +705,7 @@ export function useMessages(options: UseMessagesOptions) {
       })
       .catch((error) => {
         if (abort.signal.aborted) return;
-        if (!streamStarted && !connection.runId) {
-          ensureBotRecordVisible(connection);
-          appendPlain(botRecord, `\n\n${String(error?.message || error)}`);
-        }
+        lastError = error;
         console.error("SSE chat failed; attempting to resume:", error);
       })
       .finally(async () => {
@@ -712,7 +715,18 @@ export function useMessages(options: UseMessagesOptions) {
           if (connection.runId) {
             startResumeStream(sessionId, connection.runId, botRecord);
           } else {
-            await resumeActiveRuns(sessionId, botRecord);
+            const resumed = await resumeActiveRuns(sessionId, botRecord);
+            if (!resumed && !streamStarted) {
+              ensureBotRecordVisible(connection);
+              appendPlain(
+                botRecord,
+                `\n\n${String(
+                  (lastError as Error)?.message ||
+                    lastError ||
+                    "SSE connection closed before completion.",
+                )}`,
+              );
+            }
           }
         }
         await options.onSessionsChanged?.();
@@ -903,7 +917,11 @@ export function useMessages(options: UseMessagesOptions) {
           connection.botRecord
         ) {
           if (connection.runId) {
-            startResumeStream(sessionId, connection.runId, connection.botRecord);
+            startResumeStream(
+              sessionId,
+              connection.runId,
+              connection.botRecord,
+            );
           } else {
             unresolvedBotRecord ||= connection.botRecord;
           }

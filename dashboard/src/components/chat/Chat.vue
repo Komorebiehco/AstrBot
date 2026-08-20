@@ -1325,6 +1325,7 @@ watch(projectDialogOpen, (open) => {
 });
 
 async function selectSession(sessionId: string, pushRoute = true) {
+  const switchingSession = currSessionId.value !== sessionId;
   showChatWorkspace();
   selectedProjectId.value = null;
   currSessionId.value = sessionId;
@@ -1334,7 +1335,7 @@ async function selectSession(sessionId: string, pushRoute = true) {
   }
   if (!loadedSessions[sessionId]) {
     await loadSessionMessages(sessionId);
-  } else {
+  } else if (switchingSession) {
     cleanupConnections(sessionId);
     await loadSessionMessages(sessionId, true, false);
   }
