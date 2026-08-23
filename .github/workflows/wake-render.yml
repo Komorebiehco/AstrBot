@@ -1,0 +1,26 @@
+name: Wake Render before daily pushes
+
+on:
+  schedule:
+    # GitHub Actions uses UTC. This covers 08:15-08:35 in Asia/Shanghai.
+    - cron: "15-35/5 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wake-render-daily-pushes
+  cancel-in-progress: true
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Wake AstrBot
+        run: |
+          curl --fail --silent --show-error \
+            --retry 2 --retry-all-errors --retry-delay 10 --max-time 120 \
+            https://astrbot.coujidan.dpdns.org/api/v1/auth/setup-status \
+            > /dev/null
