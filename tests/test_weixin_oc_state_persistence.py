@@ -17,6 +17,37 @@ class _Config(dict):
 
 
 @pytest.mark.asyncio
+async def test_poll_inbound_updates_saves_new_context_token():
+    calls: list[str] = []
+
+    class Client:
+        async def request_json(self, *args, **kwargs):
+            return {"ret": 0, "msgs": [{"from_user_id": "user"}]}
+
+    adapter = object.__new__(WeixinOCAdapter)
+    adapter.client = Client()
+    adapter._sync_buf = "sync-buffer"
+    adapter._context_tokens_dirty = False
+    adapter._shutdown_event = asyncio.Event()
+    adapter.long_poll_timeout_ms = 35_000
+    adapter._is_successful_api_payload = lambda data: True
+
+    async def handle_inbound_message(msg):
+        adapter._context_tokens_dirty = True
+        calls.append("handle")
+
+    async def save_account_state():
+        calls.append("save")
+
+    adapter._handle_inbound_message = handle_inbound_message
+    adapter._save_account_state = save_account_state
+
+    await adapter._poll_inbound_updates()
+
+    assert calls == ["handle", "save"]
+
+
+@pytest.mark.asyncio
 async def test_save_account_state_uses_async_config_persistence(monkeypatch):
     calls: list[str] = []
     config = _Config(

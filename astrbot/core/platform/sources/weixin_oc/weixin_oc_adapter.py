@@ -1643,6 +1643,7 @@ class WeixinOCAdapter(Platform):
             if not isinstance(msg, dict):
                 continue
             await self._handle_inbound_message(msg)
+        should_save_state = should_save_state or self._context_tokens_dirty
         if should_save_state:
             await self._save_account_state()
 
