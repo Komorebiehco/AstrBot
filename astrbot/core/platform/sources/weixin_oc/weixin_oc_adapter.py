@@ -104,6 +104,8 @@ class WeixinOCAdapter(Platform):
     SESSION_TIMEOUT_ERRCODE = -14
     SENDMESSAGE_MIN_INTERVAL_S = 1.0
     SENDMESSAGE_RETRY_DELAYS_S = (1.5, 3.0, 6.0)
+    PENDING_TEXT_MESSAGE_LIMIT = 50
+    PENDING_TEXT_MESSAGE_TTL_S = 3 * 24 * 60 * 60
     IMAGE_ITEM_TYPE = 2
     VOICE_ITEM_TYPE = 3
     FILE_ITEM_TYPE = 4
@@ -162,6 +164,11 @@ class WeixinOCAdapter(Platform):
         self._context_tokens: dict[str, str] = {}
         self._context_tokens_dirty = False
         self._context_tokens_revision = 0
+        self._pending_text_messages: list[dict[str, Any]] = []
+        self._pending_text_messages_dirty = False
+        self._pending_text_messages_revision = 0
+        self._pending_text_message_lock = asyncio.Lock()
+        self._pending_drain_user_ids: set[str] = set()
         self._typing_states: dict[str, TypingSessionState] = {}
         self._last_inbound_error = ""
         self._recent_message_cache_size = self._get_int_config(
@@ -554,6 +561,11 @@ class WeixinOCAdapter(Platform):
         raw_context_tokens = self.config.get("weixin_oc_context_tokens", {})
         if isinstance(raw_context_tokens, dict):
             self._context_tokens = self._normalize_context_tokens(raw_context_tokens)
+        raw_pending_messages = self.config.get("weixin_oc_pending_text_messages", [])
+        if isinstance(raw_pending_messages, list):
+            self._pending_text_messages = self._normalize_pending_text_messages(
+                raw_pending_messages
+            )
 
     def _normalize_context_tokens(
         self, raw_context_tokens: Mapping[object, object]
@@ -567,14 +579,55 @@ class WeixinOCAdapter(Platform):
             normalized_context_tokens[normalized_user_id] = normalized_context_token
         return normalized_context_tokens
 
+    def _normalize_pending_text_messages(
+        self, raw_messages: list[object]
+    ) -> list[dict[str, Any]]:
+        """Normalize and bound delayed plain-text messages loaded from config.
+
+        Args:
+            raw_messages: Raw queue entries from the platform configuration.
+
+        Returns:
+            Valid queue entries that have not expired.
+        """
+        now = int(time.time())
+        oldest_allowed = now - self.PENDING_TEXT_MESSAGE_TTL_S
+        normalized: list[dict[str, Any]] = []
+        for raw_message in raw_messages:
+            if not isinstance(raw_message, dict):
+                continue
+            user_id = str(raw_message.get("user_id", "")).strip()
+            text = str(raw_message.get("text", "")).strip()
+            try:
+                created_at = int(raw_message.get("created_at") or now)
+            except (TypeError, ValueError):
+                created_at = now
+            if not user_id or not text or created_at < oldest_allowed:
+                continue
+            message_id = str(raw_message.get("id", "")).strip() or uuid.uuid4().hex
+            normalized.append(
+                {
+                    "id": message_id,
+                    "user_id": user_id,
+                    "text": text,
+                    "created_at": created_at,
+                }
+            )
+        return normalized[-self.PENDING_TEXT_MESSAGE_LIMIT :]
+
     async def _save_account_state(self) -> None:
         normalized_context_tokens = self._normalize_context_tokens(self._context_tokens)
         context_tokens_revision = self._context_tokens_revision
+        pending_text_messages = self._normalize_pending_text_messages(
+            list(self._pending_text_messages)
+        )
+        pending_text_messages_revision = self._pending_text_messages_revision
         self.config["weixin_oc_token"] = self.token or ""
         self.config["weixin_oc_account_id"] = self.account_id or ""
         self.config["weixin_oc_sync_buf"] = self._sync_buf
         self.config["weixin_oc_base_url"] = self.base_url
         self.config["weixin_oc_context_tokens"] = normalized_context_tokens
+        self.config["weixin_oc_pending_text_messages"] = pending_text_messages
 
         for platform in astrbot_config.get("platform", []):
             if not isinstance(platform, dict):
@@ -588,12 +641,128 @@ class WeixinOCAdapter(Platform):
             platform["weixin_oc_sync_buf"] = self._sync_buf
             platform["weixin_oc_base_url"] = self.base_url
             platform["weixin_oc_context_tokens"] = normalized_context_tokens
+            platform["weixin_oc_pending_text_messages"] = pending_text_messages
             break
 
         self._sync_client_state()
         committed = await astrbot_config.save_config_async()
         if committed and context_tokens_revision == self._context_tokens_revision:
             self._context_tokens_dirty = False
+        if (
+            committed
+            and pending_text_messages_revision == self._pending_text_messages_revision
+        ):
+            self._pending_text_messages_dirty = False
+
+    async def _enqueue_pending_text_message(
+        self,
+        user_id: str,
+        item_list: list[dict[str, Any]],
+    ) -> bool:
+        """Persist a plain-text message for delivery after context refresh.
+
+        Args:
+            user_id: Weixin recipient ID.
+            item_list: Prepared Weixin message items.
+
+        Returns:
+            Whether the payload was accepted into the delayed queue.
+        """
+        if not item_list or any(int(item.get("type") or 0) != 1 for item in item_list):
+            return False
+        text = self._message_text_from_item_list(item_list, include_ref_text=False)
+        if not text:
+            return False
+
+        async with self._pending_text_message_lock:
+            normalized = self._normalize_pending_text_messages(
+                list(self._pending_text_messages)
+            )
+            if normalized != self._pending_text_messages:
+                self._pending_text_messages = normalized
+                self._pending_text_messages_revision += 1
+                self._pending_text_messages_dirty = True
+            if any(
+                entry["user_id"] == user_id and entry["text"] == text
+                for entry in normalized
+            ):
+                if self._pending_text_messages_dirty:
+                    await self._save_account_state()
+                return True
+            normalized.append(
+                {
+                    "id": uuid.uuid4().hex,
+                    "user_id": user_id,
+                    "text": text,
+                    "created_at": int(time.time()),
+                }
+            )
+            self._pending_text_messages = normalized[-self.PENDING_TEXT_MESSAGE_LIMIT :]
+            self._pending_text_messages_revision += 1
+            self._pending_text_messages_dirty = True
+            await self._save_account_state()
+            pending_count = sum(
+                entry["user_id"] == user_id for entry in self._pending_text_messages
+            )
+        logger.info(
+            "weixin_oc(%s): queued a text message for delayed delivery to %s (%d pending)",
+            self.meta().id,
+            user_id,
+            pending_count,
+        )
+        return True
+
+    async def _drain_pending_text_messages(self, user_id: str) -> None:
+        """Deliver queued text after an inbound message refreshes context.
+
+        Args:
+            user_id: Weixin user whose context token was refreshed.
+
+        Returns:
+            None.
+        """
+        async with self._pending_text_message_lock:
+            normalized = self._normalize_pending_text_messages(
+                list(self._pending_text_messages)
+            )
+            queue_changed = normalized != self._pending_text_messages
+            if queue_changed:
+                self._pending_text_messages = normalized
+                self._pending_text_messages_revision += 1
+                self._pending_text_messages_dirty = True
+                await self._save_account_state()
+            pending = [entry for entry in normalized if entry["user_id"] == user_id]
+
+        delivered_ids: set[str] = set()
+        for entry in pending:
+            sent = await self._send_items_to_session(
+                user_id,
+                [self._build_plain_text_item(entry["text"])],
+                cache_components=[Plain(entry["text"])],
+                cache_message_str=entry["text"],
+                queue_on_failure=False,
+            )
+            if not sent:
+                break
+            delivered_ids.add(entry["id"])
+
+        if not delivered_ids:
+            return
+        async with self._pending_text_message_lock:
+            self._pending_text_messages = [
+                entry
+                for entry in self._pending_text_messages
+                if entry["id"] not in delivered_ids
+            ]
+            self._pending_text_messages_revision += 1
+            self._pending_text_messages_dirty = True
+            await self._save_account_state()
+        logger.info(
+            "weixin_oc(%s): delivered %d queued text message(s) to %s",
+            self.meta().id,
+            len(delivered_ids),
+            user_id,
+        )
 
     def _is_login_session_valid(
         self, login_session: OpenClawLoginSession | None
@@ -877,9 +1046,26 @@ class WeixinOCAdapter(Platform):
         *,
         cache_components: list[Any] | None = None,
         cache_message_str: str | None = None,
+        queue_on_failure: bool = True,
     ) -> bool:
+        """Send prepared Weixin items and optionally queue delayed plain text.
+
+        Args:
+            user_id: Weixin recipient ID.
+            item_list: Prepared Weixin API message items.
+            cache_components: Components stored in the recent-message cache.
+            cache_message_str: Text stored in the recent-message cache.
+            queue_on_failure: Queue plain text after a missing or stale context.
+
+        Returns:
+            Whether the message was sent or accepted for delayed delivery.
+        """
         if not self.token:
             logger.warning("weixin_oc(%s): missing token, skip send", self.meta().id)
+            if queue_on_failure and await self._enqueue_pending_text_message(
+                user_id, item_list
+            ):
+                return True
             return False
         if not item_list:
             logger.warning(
@@ -894,6 +1080,10 @@ class WeixinOCAdapter(Platform):
                 self.meta().id,
                 user_id,
             )
+            if queue_on_failure and await self._enqueue_pending_text_message(
+                user_id, item_list
+            ):
+                return True
             return False
         request_payload = {
             "base_info": {
@@ -917,13 +1107,26 @@ class WeixinOCAdapter(Platform):
                     if remaining > 0:
                         await asyncio.sleep(remaining)
 
-                response_payload = await self.client.request_json(
-                    "POST",
-                    "ilink/bot/sendmessage",
-                    payload=request_payload,
-                    token_required=True,
-                    headers={},
-                )
+                try:
+                    response_payload = await self.client.request_json(
+                        "POST",
+                        "ilink/bot/sendmessage",
+                        payload=request_payload,
+                        token_required=True,
+                        headers={},
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "weixin_oc(%s): sendmessage request failed for %s: %s",
+                        self.meta().id,
+                        user_id,
+                        e,
+                    )
+                    if queue_on_failure and await self._enqueue_pending_text_message(
+                        user_id, item_list
+                    ):
+                        return True
+                    raise
                 self._last_sendmessage_request_at = time.monotonic()
                 if self._is_successful_api_payload(response_payload):
                     break
@@ -936,6 +1139,12 @@ class WeixinOCAdapter(Platform):
                         user_id,
                         self._format_api_error(response_payload),
                     )
+                    if (
+                        ret == -2
+                        and queue_on_failure
+                        and await self._enqueue_pending_text_message(user_id, item_list)
+                    ):
+                        return True
                     return False
 
                 delay = self.SENDMESSAGE_RETRY_DELAYS_S[attempt]
@@ -1543,6 +1752,11 @@ class WeixinOCAdapter(Platform):
                 self._context_tokens[from_user_id] = context_token
                 self._context_tokens_revision += 1
                 self._context_tokens_dirty = True
+            if any(
+                entry["user_id"] == from_user_id
+                for entry in self._pending_text_messages
+            ):
+                self._pending_drain_user_ids.add(from_user_id)
 
         item_list = cast(list[dict[str, Any]], msg.get("item_list", []))
         reply_component = None
@@ -1646,6 +1860,18 @@ class WeixinOCAdapter(Platform):
         should_save_state = should_save_state or self._context_tokens_dirty
         if should_save_state:
             await self._save_account_state()
+        pending_drain_user_ids = tuple(self._pending_drain_user_ids)
+        self._pending_drain_user_ids.clear()
+        for user_id in pending_drain_user_ids:
+            try:
+                await self._drain_pending_text_messages(user_id)
+            except Exception:
+                logger.warning(
+                    "weixin_oc(%s): queued message delivery failed for %s",
+                    self.meta().id,
+                    user_id,
+                    exc_info=True,
+                )
 
     def _message_chain_to_text(self, message_chain: MessageChain) -> str:
         text = ""

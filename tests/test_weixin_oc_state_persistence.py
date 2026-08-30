@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -28,6 +29,7 @@ async def test_poll_inbound_updates_saves_new_context_token():
     adapter.client = Client()
     adapter._sync_buf = "sync-buffer"
     adapter._context_tokens_dirty = False
+    adapter._pending_drain_user_ids = set()
     adapter._shutdown_event = asyncio.Event()
     adapter.long_poll_timeout_ms = 35_000
     adapter._is_successful_api_payload = lambda data: True
@@ -41,6 +43,7 @@ async def test_poll_inbound_updates_saves_new_context_token():
 
     adapter._handle_inbound_message = handle_inbound_message
     adapter._save_account_state = save_account_state
+    adapter._drain_pending_text_messages = AsyncMock()
 
     await adapter._poll_inbound_updates()
 
@@ -73,6 +76,10 @@ async def test_save_account_state_uses_async_config_persistence(monkeypatch):
     adapter._context_tokens = {"user": "context-token"}
     adapter._context_tokens_dirty = True
     adapter._context_tokens_revision = 0
+    adapter._pending_text_messages = []
+    adapter._pending_text_messages_dirty = False
+    adapter._pending_text_messages_revision = 0
+    adapter._pending_text_message_lock = asyncio.Lock()
     adapter._sync_client_state = lambda: None
 
     await adapter._save_account_state()
@@ -114,6 +121,10 @@ async def test_save_account_state_keeps_dirty_flag_for_new_context_token(monkeyp
     adapter._context_tokens = {"user": "old-context-token"}
     adapter._context_tokens_dirty = True
     adapter._context_tokens_revision = 0
+    adapter._pending_text_messages = []
+    adapter._pending_text_messages_dirty = False
+    adapter._pending_text_messages_revision = 0
+    adapter._pending_text_message_lock = asyncio.Lock()
     adapter._sync_client_state = lambda: None
 
     save_task = asyncio.create_task(adapter._save_account_state())
@@ -169,6 +180,10 @@ async def test_save_account_state_keeps_dirty_flag_after_context_token_aba(
     adapter._context_tokens = {"user": "context-a"}
     adapter._context_tokens_dirty = True
     adapter._context_tokens_revision = 0
+    adapter._pending_text_messages = []
+    adapter._pending_text_messages_dirty = False
+    adapter._pending_text_messages_revision = 0
+    adapter._pending_text_message_lock = asyncio.Lock()
     adapter._sync_client_state = lambda: None
 
     save_task = asyncio.create_task(adapter._save_account_state())
@@ -182,3 +197,61 @@ async def test_save_account_state_keeps_dirty_flag_after_context_token_aba(
     await save_task
 
     assert adapter._context_tokens_dirty is True
+
+
+@pytest.mark.asyncio
+async def test_save_account_state_keeps_dirty_flag_for_new_pending_message(
+    monkeypatch,
+):
+    save_started = asyncio.Event()
+    finish_save = asyncio.Event()
+
+    class BlockingConfig(dict):
+        async def save_config_async(self) -> bool:
+            save_started.set()
+            await finish_save.wait()
+            return True
+
+    config = BlockingConfig(
+        {
+            "platform": [
+                {
+                    "id": "weixin-test",
+                    "type": "weixin_oc",
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(weixin_oc_adapter, "astrbot_config", config)
+
+    adapter = object.__new__(WeixinOCAdapter)
+    adapter.config = {"id": "weixin-test", "type": "weixin_oc"}
+    adapter.token = "token"
+    adapter.account_id = "account"
+    adapter._sync_buf = "sync-buffer"
+    adapter.base_url = "https://example.com"
+    adapter._context_tokens = {"user": "context-token"}
+    adapter._context_tokens_dirty = False
+    adapter._context_tokens_revision = 0
+    adapter._pending_text_messages = []
+    adapter._pending_text_messages_dirty = True
+    adapter._pending_text_messages_revision = 0
+    adapter._pending_text_message_lock = asyncio.Lock()
+    adapter._sync_client_state = lambda: None
+
+    save_task = asyncio.create_task(adapter._save_account_state())
+    await asyncio.wait_for(save_started.wait(), timeout=5)
+    adapter._pending_text_messages.append(
+        {
+            "id": "pending-1",
+            "user_id": "user",
+            "text": "delayed",
+            "created_at": 1_788_093_600,
+        }
+    )
+    adapter._pending_text_messages_revision += 1
+    adapter._pending_text_messages_dirty = True
+    finish_save.set()
+    await save_task
+
+    assert adapter._pending_text_messages_dirty is True

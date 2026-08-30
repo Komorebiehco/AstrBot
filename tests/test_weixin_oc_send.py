@@ -16,11 +16,13 @@ def _make_adapter(*responses: dict) -> WeixinOCAdapter:
     adapter.metadata = SimpleNamespace(id="weixin-test")
     adapter._context_tokens = {"user": "context-token"}
     adapter._sendmessage_lock = asyncio.Lock()
+    adapter._pending_text_message_lock = asyncio.Lock()
     adapter._last_sendmessage_request_at = 0.0
     adapter.client = SimpleNamespace(
         request_json=AsyncMock(side_effect=list(responses)),
     )
     adapter._cache_recent_message = MagicMock()
+    adapter._enqueue_pending_text_message = AsyncMock(return_value=False)
     return adapter
 
 
@@ -129,3 +131,92 @@ async def test_sendmessage_serializes_concurrent_calls_and_spaces_requests():
     assert max_active_requests == 1
     assert len(request_started_at) == 2
     assert request_started_at[1] - request_started_at[0] >= 0.045
+
+
+@pytest.mark.asyncio
+async def test_missing_context_queues_plain_text_for_delayed_delivery():
+    adapter = _make_adapter()
+    del adapter._enqueue_pending_text_message
+    adapter._context_tokens = {}
+    adapter._pending_text_messages = []
+    adapter._pending_text_messages_dirty = False
+    adapter._pending_text_messages_revision = 0
+    adapter._save_account_state = AsyncMock()
+
+    result = await adapter._send_items_to_session(
+        "user",
+        [adapter._build_plain_text_item("delayed")],
+    )
+
+    assert result is True
+    assert [entry["text"] for entry in adapter._pending_text_messages] == ["delayed"]
+    adapter._save_account_state.assert_awaited_once()
+    adapter.client.request_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_context_does_not_queue_media_payload():
+    adapter = _make_adapter()
+    del adapter._enqueue_pending_text_message
+    adapter._context_tokens = {}
+    adapter._pending_text_messages = []
+    adapter._pending_text_messages_dirty = False
+    adapter._pending_text_messages_revision = 0
+    adapter._save_account_state = AsyncMock()
+
+    result = await adapter._send_items_to_session(
+        "user",
+        [{"type": adapter.IMAGE_ITEM_TYPE, "image_item": {"media": {}}}],
+    )
+
+    assert result is False
+    assert adapter._pending_text_messages == []
+    adapter._save_account_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_queues_plain_text(monkeypatch):
+    responses = [
+        {"ret": -2, "errcode": 0, "errmsg": "prepare failed"}
+        for _ in range(len(WeixinOCAdapter.SENDMESSAGE_RETRY_DELAYS_S) + 1)
+    ]
+    adapter = _make_adapter(*responses)
+    del adapter._enqueue_pending_text_message
+    adapter._pending_text_messages = []
+    adapter._pending_text_messages_dirty = False
+    adapter._pending_text_messages_revision = 0
+    adapter._save_account_state = AsyncMock()
+    monkeypatch.setattr(weixin_oc_adapter.asyncio, "sleep", AsyncMock())
+
+    result = await adapter._send_items_to_session(
+        "user",
+        [adapter._build_plain_text_item("delayed")],
+    )
+
+    assert result is True
+    assert [entry["text"] for entry in adapter._pending_text_messages] == ["delayed"]
+    adapter._save_account_state.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_context_refresh_drains_and_removes_queued_text():
+    adapter = _make_adapter()
+    adapter._pending_text_messages = [
+        {
+            "id": "pending-1",
+            "user_id": "user",
+            "text": "delayed",
+            "created_at": int(time.time()),
+        }
+    ]
+    adapter._pending_text_messages_dirty = False
+    adapter._pending_text_messages_revision = 0
+    adapter._send_items_to_session = AsyncMock(return_value=True)
+    adapter._save_account_state = AsyncMock()
+
+    await adapter._drain_pending_text_messages("user")
+
+    assert adapter._pending_text_messages == []
+    adapter._send_items_to_session.assert_awaited_once()
+    assert adapter._send_items_to_session.await_args.kwargs["queue_on_failure"] is False
+    adapter._save_account_state.assert_awaited_once()
