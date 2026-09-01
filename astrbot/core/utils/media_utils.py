@@ -213,20 +213,28 @@ def file_uri_to_path(file_uri: MediaRefStr) -> str:
         return file_uri
 
     parsed = urlparse(file_uri)
-    netloc = parsed.netloc or ""
+    netloc = unquote(parsed.netloc or "")
     path = parsed.path or ""
+    # Older clients emitted ``file://localhostD:/...`` without the slash
+    # separating the authority from the Windows drive. Treat that form as a
+    # local drive path instead of interpreting ``localhostD:`` as a host.
+    if netloc.lower().startswith("localhost") and len(netloc) >= 11:
+        legacy_drive = netloc[9:]
+        if len(legacy_drive) == 2 and legacy_drive[1] == ":":
+            path = f"{legacy_drive}{path}"
+            netloc = ""
     if netloc and netloc.lower() != "localhost":
         if len(netloc) == 2 and netloc[1] == ":" and netloc[0].isalpha():
-            return url2pathname(f"{netloc}{path}").replace("\\", "/")
-        return url2pathname(f"//{netloc}{path}").replace("\\", "/")
+            return os.path.normpath(url2pathname(f"{netloc}{path}"))
+        return os.path.normpath(url2pathname(f"//{netloc}{path}"))
 
-    path = url2pathname(path).replace("\\", "/")
+    path = url2pathname(path)
     if len(path) >= 4 and path[0] == "/" and path[2] == ":" and path[1].isalpha():
         path = path[1:]
     elif os.name != "nt" and path.startswith("//"):
         # Older AstrBot builds generated file:////path for POSIX absolute paths.
         path = "/" + path.lstrip("/")
-    return path
+    return os.path.normpath(path)
 
 
 def _extension_from_mime_type(mime_type: str | None) -> str | None:
@@ -1127,7 +1135,10 @@ async def convert_audio_format(
     Raises:
         Exception: Raised when ffmpeg is unavailable or conversion fails.
     """
-    if audio_path.lower().endswith(f".{output_format}"):
+    source_path = Path(audio_path)
+    if source_path.suffix.lower() == f".{output_format}" and (
+        not source_path.exists() or _get_audio_magic_type(audio_path) == output_format
+    ):
         return audio_path
 
     if output_path is None:
