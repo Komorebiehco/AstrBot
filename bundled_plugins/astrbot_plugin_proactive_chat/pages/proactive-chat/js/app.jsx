@@ -122,7 +122,7 @@ function App() {
         if (!el) return;
 
         const key = getScrollKey();
-        const savedPos = parseInt(localStorage.getItem(key) || '0', 10);
+        const savedPos = parseInt(window.ProactiveStorage.get(key, '0'), 10);
 
         if (savedPos > 0) {
             isRestoringRef.current = true;
@@ -165,7 +165,7 @@ function App() {
         const handleScroll = () => {
             if (isRestoringRef.current) {
                 const key = getScrollKey();
-                const savedPos = parseInt(localStorage.getItem(key) || '0', 10);
+                const savedPos = parseInt(window.ProactiveStorage.get(key, '0'), 10);
                 if (savedPos > 0 && Math.abs(el.scrollTop - savedPos) > 100) {
                     isRestoringRef.current = false;
                 }
@@ -174,7 +174,7 @@ function App() {
             window.clearTimeout(timeout);
             timeout = window.setTimeout(() => {
                 const key = getScrollKey();
-                localStorage.setItem(key, String(el.scrollTop));
+                window.ProactiveStorage.set(key, String(el.scrollTop));
             }, 120);
         };
 
@@ -367,4 +367,3 @@ if (!window.__PROACTIVE_WEBUI_INITIALIZED) {
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<AuthWrapper />);
 }
-

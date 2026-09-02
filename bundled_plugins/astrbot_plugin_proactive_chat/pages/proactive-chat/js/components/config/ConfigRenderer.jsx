@@ -648,7 +648,7 @@ function ConfigRenderer() {
     // 使用 useLayoutEffect 恢复滚动位置，尽量让用户在绘制完成前回到上次浏览位置。
     useLayoutEffect(() => {
         if (!loading && scrollContainerRef.current) {
-            const savedPos = localStorage.getItem(getScrollKey());
+            const savedPos = window.ProactiveStorage.get(getScrollKey(), '');
             if (savedPos) {
                 // 尝试恢复
                 const pos = parseInt(savedPos, 10);
@@ -671,7 +671,7 @@ function ConfigRenderer() {
         if (!el || loading) return;
 
         const handleScroll = () => {
-            localStorage.setItem(getScrollKey(), el.scrollTop);
+            window.ProactiveStorage.set(getScrollKey(), el.scrollTop);
         };
 
         let timeout;
@@ -690,14 +690,14 @@ function ConfigRenderer() {
     // 自动保存草稿，但只有发生本地修改时才写入，避免把服务端新值反向覆盖成本地草稿。
     useEffect(() => {
         if (config && isDirtyRef.current) {
-            localStorage.setItem(getDraftKey(), JSON.stringify(config));
+            window.ProactiveStorage.set(getDraftKey(), JSON.stringify(config));
         }
     }, [config, mode, selectedSession]);
 
     // 记忆折叠 / 展开状态，让用户在大型 Schema 中保持稳定的浏览结构。
     useEffect(() => {
         if (schema) { // 确保 schema 加载后再保存，避免初始化时的空状态覆盖
-            localStorage.setItem(getExpandedKey(), JSON.stringify(expandedKeys));
+            window.ProactiveStorage.set(getExpandedKey(), JSON.stringify(expandedKeys));
         }
     }, [expandedKeys, schema, mode, selectedSession]);
 
@@ -784,7 +784,7 @@ function ConfigRenderer() {
             isDirtyRef.current = false;
 
             // 2. 处理展开状态记忆
-            const cachedExpandedStr = localStorage.getItem(getExpandedKey(currentMode, currentSession));
+            const cachedExpandedStr = window.ProactiveStorage.get(getExpandedKey(currentMode, currentSession), '');
             let finalExpandedKeys = [];
             if (cachedExpandedStr) {
                 try {
@@ -871,7 +871,7 @@ function ConfigRenderer() {
                     effective: cleanedConfig
                 });
                 isDirtyRef.current = false;
-                localStorage.removeItem(getDraftKey(currentMode, currentSession));
+                window.ProactiveStorage.remove(getDraftKey(currentMode, currentSession));
                 setConfig(response?.effective || cleanedConfig);
                 setSaveFeedback({ type: 'success', text: '会话差异配置已保存' });
                 await loadSessions();
@@ -886,7 +886,7 @@ function ConfigRenderer() {
                 await api.updateConfig(payload);
                 isDirtyRef.current = false;
                 setConfig(cleanedConfig); // 全局模式可直接更新界面
-                localStorage.removeItem(getDraftKey(currentMode, currentSession)); // 已保存，清除草稿
+                window.ProactiveStorage.remove(getDraftKey(currentMode, currentSession)); // 已保存，清除草稿
                 setSaveFeedback({ type: 'success', text: '全局配置已保存' });
             }
         } catch (e) {
@@ -911,7 +911,7 @@ function ConfigRenderer() {
         setSaving(true);
         try {
             await api.resetSessionConfig(selectedSession);
-            localStorage.removeItem(getDraftKey(mode, selectedSession));
+            window.ProactiveStorage.remove(getDraftKey(mode, selectedSession));
             setSaveFeedback({ type: 'success', text: '会话差异配置已清空' });
             await loadSessions();
             await loadConfig(mode, selectedSession);
@@ -1202,7 +1202,7 @@ function ConfigRenderer() {
                                     isDirtyRef.current = true;
                                     setConfig(defaults);
                                 }
-                                localStorage.removeItem(getDraftKey());
+                                window.ProactiveStorage.remove(getDraftKey());
                             }
                         }}
                         disabled={saving}
@@ -1223,7 +1223,7 @@ function ConfigRenderer() {
                     <Button
                         onClick={() => {
                             if (confirm('确定要撤销所有未保存的更改吗？\n\n这将重新加载服务器上已保存的配置。')) {
-                                localStorage.removeItem(getDraftKey());
+                                window.ProactiveStorage.remove(getDraftKey());
                                 loadConfig();
                             }
                         }}
@@ -1286,4 +1286,3 @@ function ConfigRenderer() {
 
 window.ConfigRenderer = ConfigRenderer;
 })();
-

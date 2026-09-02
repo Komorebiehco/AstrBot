@@ -135,7 +135,9 @@
                             .then(function(code) {
                                 if (typeof Babel === 'undefined') {
                                     self.showError("Babel is not loaded, failed to compile: " + src);
-                                    return; // 终止加载，不恢复 scriptRunning，不触发后续队列
+                                    self.scriptRunning = false;
+                                    self.triggerPendingScripts();
+                                    return;
                                 }
 
                                 try {
@@ -152,10 +154,14 @@
                                     self.triggerPendingScripts();
                                 } catch (e) {
                                     self.showError("Failed to compile JSX file " + src + ": " + e.message);
+                                    self.scriptRunning = false;
+                                    self.triggerPendingScripts();
                                 }
                             })
                             .catch(function(err) {
                                 self.showError("Failed to fetch JSX script " + resolvedSrc + ": " + err.message);
+                                self.scriptRunning = false;
+                                self.triggerPendingScripts();
                             });
                     } else {
                         var s = document.createElement('script');
@@ -166,6 +172,8 @@
                         };
                         s.onerror = function() {
                             self.showError("Failed to load script: " + resolvedSrc);
+                            self.scriptRunning = false;
+                            self.triggerPendingScripts();
                         };
                         document.body.appendChild(s);
                     }
@@ -183,6 +191,8 @@
                         self.triggerPendingScripts();
                     } catch (e) {
                         self.showError("Inline task failed: " + e.message);
+                        self.scriptRunning = false;
+                        self.triggerPendingScripts();
                     }
                 });
                 this.triggerPendingScripts();
@@ -232,6 +242,7 @@
     <!-- 工具脚本必须先于 JSX 模块加载，以便后者可直接使用 window 上的工具对象。 -->
     <script>
         window.ProactiveLoader.queueScript("js/utils/auth.js", false);
+        window.ProactiveLoader.queueScript("js/utils/storage.js", false);
         window.ProactiveLoader.queueScript("js/utils/http.js", false);
         window.ProactiveLoader.queueScript("js/utils/formatters.js", false);
         window.ProactiveLoader.queueScript("js/utils/markdown.js", false);
