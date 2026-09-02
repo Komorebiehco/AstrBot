@@ -111,12 +111,33 @@ const normalizePluginEndpoint = (endpoint) => {
   }
 
   const segments = trimmed.split("/");
-  if (
-    segments.some((segment) => !segment || segment === "." || segment === "..")
-  ) {
-    throw new Error("Plugin bridge endpoint is invalid.");
-  }
-  return segments.map((segment) => encodeURIComponent(segment)).join("/");
+  return segments
+    .map((segment) => {
+      if (!segment) {
+        throw new Error("Plugin bridge endpoint is invalid.");
+      }
+
+      let decodedSegment;
+      try {
+        // Plugin Page clients encode path parameters before posting them to the
+        // bridge. Decode one layer here so the parent does not double-encode
+        // values such as session IDs containing a colon.
+        decodedSegment = decodeURIComponent(segment);
+      } catch {
+        throw new Error("Plugin bridge endpoint is invalid.");
+      }
+
+      if (
+        !decodedSegment ||
+        decodedSegment === "." ||
+        decodedSegment === ".." ||
+        decodedSegment.includes("\\")
+      ) {
+        throw new Error("Plugin bridge endpoint is invalid.");
+      }
+      return encodeURIComponent(decodedSegment);
+    })
+    .join("/");
 };
 
 const buildPluginApiPath = (endpoint) => {

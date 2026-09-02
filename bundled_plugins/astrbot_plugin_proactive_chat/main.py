@@ -70,6 +70,8 @@ class ProactiveChatPlugin(
         self.session_data: dict = {}
         # 记录当前正在执行“立即触发”的会话，防止重复点击导致并发主动消息。
         self.manual_trigger_sessions: set[str] = set()
+        # 保存最近一次手动触发的真实结果，供管理端在后台任务完成后展示。
+        self.manual_trigger_results: dict[str, dict] = {}
 
         # 会话差异配置管理器、通知中心与 Web 管理端
         self.session_override_manager = SessionOverrideManager(self.data_dir)

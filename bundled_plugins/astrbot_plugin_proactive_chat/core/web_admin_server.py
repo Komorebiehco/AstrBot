@@ -619,8 +619,30 @@ class WebAdminServer:
                 )
 
             self.plugin.manual_trigger_sessions.add(normalized)
+            manual_results = getattr(self.plugin, "manual_trigger_results", None)
+            if manual_results is None:
+                manual_results = self.plugin.manual_trigger_results = {}
+            manual_results.pop(normalized, None)
+
+            async def run_manual_trigger():
+                try:
+                    result = await self.plugin.check_and_chat(normalized, manual=True)
+                except Exception as exc:
+                    logger.error(f"[主动消息] 手动触发任务异常喵: {exc}")
+                    result = {
+                        "ok": False,
+                        "session": normalized,
+                        "message": f"手动触发失败：{exc}",
+                    }
+                manual_results[normalized] = result or {
+                    "ok": False,
+                    "session": normalized,
+                    "message": "手动触发未返回结果",
+                }
+                await self._broadcast_update("jobs")
+
             # 主动创建后台任务，避免前端请求长时间挂起等待业务执行完成。
-            asyncio.create_task(self.plugin.check_and_chat(normalized))
+            asyncio.create_task(run_manual_trigger())
             await self._broadcast_update("jobs")
             return {
                 "ok": True,
@@ -1039,6 +1061,11 @@ class WebAdminServer:
                     "unanswered_count": session_data.get("unanswered_count", 0),
                     "manual_trigger_in_progress": session_id
                     in self.plugin.manual_trigger_sessions,
+                    "manual_trigger_result": getattr(
+                        self.plugin, "manual_trigger_results", {}
+                    ).get(
+                        session_id
+                    ),
                     # 以下字段用于前端推导进度条与调度窗口说明。
                     "next_trigger_time": session_data.get("next_trigger_time"),
                     "last_scheduled_at": session_data.get("last_scheduled_at"),
@@ -1099,6 +1126,11 @@ class WebAdminServer:
                     ),
                     "manual_trigger_in_progress": session
                     in self.plugin.manual_trigger_sessions,
+                    "manual_trigger_result": getattr(
+                        self.plugin, "manual_trigger_results", {}
+                    ).get(
+                        session
+                    ),
                 }
             )
         return result

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 文件职责：HTTP 工具模块，负责统一请求封装、鉴权头注入与错误处理。
  */
 
@@ -27,7 +27,7 @@
 
         if (!response.ok) {
             // 优先透传后端明确返回的 error 字段，提升前端报错可读性。
-            const message = payload && payload.error ? payload.error : '请求失败';
+            const message = payload && (payload.message || payload.error) ? (payload.message || payload.error) : '请求失败';
             throw new Error(message);
         }
 
@@ -50,4 +50,3 @@
         }
     };
 })();
-

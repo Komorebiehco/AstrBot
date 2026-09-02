@@ -1,4 +1,4 @@
-﻿(() => {
+(() => {
 /**
  * 文件职责：侧边导航组件，负责视图切换、目录快捷操作与仓库信息入口展示。
  */
@@ -20,19 +20,24 @@ function Sidebar({ currentView, onChange }) {
     // 版本号来自全局状态的 status 快照；未加载前先展示占位文本。
     const version = state.status?.version || '...';
     const unreadNotificationCount = Math.max(0, Number(state.notificationsMeta?.unread_count ?? 0));
-    const [logoSrc, setLogoSrc] = React.useState('/logo.png');
+    const resolveAssetUrl = (candidate) =>
+        typeof window.ProactiveLoader?.resolveAssetUrl === 'function'
+            ? window.ProactiveLoader.resolveAssetUrl(candidate)
+            : candidate;
+    const [logoSrc, setLogoSrc] = React.useState(() => resolveAssetUrl('logo.png'));
 
     React.useEffect(() => {
-        // 管理端可能被挂载在不同层级路径，依次尝试多个 logo 地址以提高兼容性。
-        const candidates = ['/logo.png', '../logo.png', 'logo.png'];
+        // 使用 GET 探测资源；原生 Plugin Page 的资产路由只保证 GET，
+        // HEAD 可能被中间层返回 405，导致实际存在的 logo 被误判为缺失。
+        const candidates = ['logo.png', '../logo.png', '/logo.png'];
         let cancelled = false;
 
         async function resolveLogo() {
             for (const candidate of candidates) {
                 try {
-                    const response = await fetch(candidate, { method: 'HEAD' });
+                    const response = await fetch(resolveAssetUrl(candidate), { method: 'GET' });
                     if (response.ok) {
-                        if (!cancelled) setLogoSrc(candidate);
+                        if (!cancelled) setLogoSrc(resolveAssetUrl(candidate));
                         return;
                     }
                 } catch (e) {
@@ -87,7 +92,9 @@ function Sidebar({ currentView, onChange }) {
                     className="sidebar-logo-img"
                     onError={() => {
                         // 图片加载失败时再尝试回退到上一级相对路径，兼容静态资源引用差异。
-                        if (logoSrc !== '../logo.png') setLogoSrc('../logo.png');
+                        if (logoSrc !== resolveAssetUrl('../logo.png')) {
+                            setLogoSrc(resolveAssetUrl('../logo.png'));
+                        }
                     }}
                 />
                 <div>
@@ -180,4 +187,3 @@ function Sidebar({ currentView, onChange }) {
 // 暴露到全局，供入口应用直接使用侧边栏组件。
 window.Sidebar = Sidebar;
 })();
-

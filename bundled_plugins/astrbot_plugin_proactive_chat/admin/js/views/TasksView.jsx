@@ -1,4 +1,4 @@
-﻿(() => {
+(() => {
 /**
  * 文件职责：任务页视图，负责调度任务列表、倒计时进度与任务操作入口展示。
  */
@@ -217,7 +217,16 @@ function TasksView({ onRefresh }) {
                 }
 
                 if (next[job.id]?.status === 'pending') {
-                    next[job.id] = { status: 'success', text: '本次立即触发已完成，按钮已恢复可用' };
+                    const result = job.manual_trigger_result;
+                    // The cleanup broadcast can arrive before the wrapper stores
+                    // the final result. Keep waiting instead of guessing success.
+                    if (!result) {
+                        return;
+                    }
+                    next[job.id] = {
+                        status: result.ok === false ? 'error' : 'success',
+                        text: result.message || '本次立即触发已完成，按钮已恢复可用',
+                    };
                     changed = true;
                 }
             });
@@ -530,4 +539,3 @@ function TasksView({ onRefresh }) {
 // 暴露为全局视图组件，供应用入口按 currentView 切换。
 window.TasksView = TasksView;
 })();
-

@@ -1,4 +1,4 @@
-﻿(() => {
+(() => {
 /**
  * 文件职责：顶部栏组件，负责标题展示、时钟显示、连接状态指示与主题切换入口。
  */
@@ -56,7 +56,12 @@ function Header({ currentView }) {
 
     // Header 不直接感知底层 socket 实例，只消费后端状态中的连接计数结果。
     const wsCount = Number(status?.ws_connections ?? 0);
-    const wsConnected = wsCount > 0;
+    const nativePluginPage = Boolean(window.__ASTRBOT_PLUGIN_PAGE_NATIVE);
+    // Native Plugin Pages run in a sandboxed iframe and intentionally use the
+    // HTTP bridge instead of opening a second WebSocket connection.
+    const wsConnected = nativePluginPage
+        ? status?.running === true
+        : wsCount > 0;
 
     return (
         <>
@@ -105,4 +110,3 @@ function Header({ currentView }) {
 // 暴露到全局，供入口应用直接渲染 Header。
 window.Header = Header;
 })();
-

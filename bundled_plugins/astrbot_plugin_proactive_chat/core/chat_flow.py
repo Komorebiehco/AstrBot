@@ -147,35 +147,67 @@ class ProactiveCoreMixin:
                 f"[主动消息] 已为 {self._get_session_log_str(session_id, scheduled_job_payload['session_config'])} 安排下一次主动消息喵，时间：{scheduled_job_payload['run_date'].strftime('%Y-%m-%d %H:%M:%S')} 喵。"
             )
 
-    async def check_and_chat(self, session_id: str) -> None:
-        """由定时任务触发的核心函数，完成一次完整的主动消息流程。"""
+    async def check_and_chat(
+        self, session_id: str, manual: bool = False
+    ) -> dict[str, Any]:
+        """执行一次主动消息流程并返回可供管理端展示的结果。
+
+        Args:
+            session_id: 要执行的规范化会话标识。
+            manual: 是否由管理端手动触发；手动触发跳过免打扰和未回复上限。
+
+        Returns:
+            包含 ``ok``、``session`` 和 ``message`` 的执行结果。
+        """
         normalized_session_id = self._normalize_session_id(session_id)
         try:
-            # 免打扰与启用状态检查
-            is_allowed, block_reason = await self._is_chat_allowed(
-                normalized_session_id
-            )
-            if not is_allowed:
-                if block_reason == "quiet_hours":
-                    logger.info("[主动消息] 当前为免打扰时段，跳过并重新调度喵。")
-                elif block_reason == "session_disabled":
-                    logger.info(
-                        f"[主动消息] {self._get_session_log_str(normalized_session_id)} 已被禁用，跳过并重新调度喵。"
-                    )
-                elif block_reason == "session_config_missing":
-                    logger.info(
-                        f"[主动消息] {self._get_session_log_str(normalized_session_id)} 未命中有效会话配置，跳过并重新调度喵。"
-                    )
-                else:
-                    logger.info(
-                        f"[主动消息] {self._get_session_log_str(normalized_session_id)} 当前不满足触发条件（原因: {block_reason}），跳过并重新调度喵。"
-                    )
-                await self._schedule_next_chat_and_save(normalized_session_id)
-                return
-
             session_config = self._get_session_config(normalized_session_id)
             if not session_config:
-                return
+                message = "未找到有效的会话配置"
+                logger.info(
+                    f"[主动消息] {self._get_session_log_str(normalized_session_id)} {message}，跳过本次主动消息喵。"
+                )
+                if not manual:
+                    await self._schedule_next_chat_and_save(normalized_session_id)
+                return {
+                    "ok": False,
+                    "session": normalized_session_id,
+                    "message": message,
+                }
+
+            if not session_config.get("enable", False):
+                message = "该会话已禁用主动消息"
+                logger.info(
+                    f"[主动消息] {self._get_session_log_str(normalized_session_id)} {message}，跳过本次主动消息喵。"
+                )
+                if not manual:
+                    await self._schedule_next_chat_and_save(normalized_session_id)
+                return {
+                    "ok": False,
+                    "session": normalized_session_id,
+                    "message": message,
+                }
+
+            # 定时任务遵守免打扰设置；管理端手动触发明确表示立即执行，因此跳过该限制。
+            if not manual:
+                is_allowed, block_reason = await self._is_chat_allowed(
+                    normalized_session_id
+                )
+                if not is_allowed:
+                    if block_reason == "quiet_hours":
+                        message = "当前处于免打扰时段"
+                        logger.info("[主动消息] 当前为免打扰时段，跳过并重新调度喵。")
+                    else:
+                        message = "当前不满足自动触发条件"
+                        logger.info(
+                            f"[主动消息] {self._get_session_log_str(normalized_session_id)} 当前不满足触发条件（原因: {block_reason}），跳过并重新调度喵。"
+                        )
+                    await self._schedule_next_chat_and_save(normalized_session_id)
+                    return {
+                        "ok": False,
+                        "session": normalized_session_id,
+                        "message": message,
+                    }
 
             schedule_conf = session_config.get("schedule_settings", {})
 
@@ -185,11 +217,19 @@ class ProactiveCoreMixin:
                     "unanswered_count", 0
                 )
                 max_unanswered = schedule_conf.get("max_unanswered_times", 3)
-                if max_unanswered > 0 and unanswered_count >= max_unanswered:
+                if (
+                    not manual
+                    and max_unanswered > 0
+                    and unanswered_count >= max_unanswered
+                ):
                     logger.info(
                         f"[主动消息] {self._get_session_log_str(normalized_session_id, session_config)} 的未回复次数 ({unanswered_count}) 已达到上限 ({max_unanswered})，暂停主动消息喵。"
                     )
-                    return
+                    return {
+                        "ok": False,
+                        "session": normalized_session_id,
+                        "message": "未回复次数已达到自动触发上限",
+                    }
 
             logger.info(
                 f"[主动消息] 开始生成第 {unanswered_count + 1} 次主动消息喵，当前未回复次数: {unanswered_count} 次喵。"
@@ -214,7 +254,11 @@ class ProactiveCoreMixin:
             request_package = await self._prepare_llm_request(normalized_session_id)
             if not request_package:
                 await self._schedule_next_chat_and_save(normalized_session_id)
-                return
+                return {
+                    "ok": False,
+                    "session": normalized_session_id,
+                    "message": "无法准备 LLM 请求上下文",
+                }
 
             conv_id = request_package["conv_id"]
             history_messages = request_package["history"]
@@ -240,7 +284,11 @@ class ProactiveCoreMixin:
             )
             if not response_text:
                 await self._schedule_next_chat_and_save(session_id)
-                return
+                return {
+                    "ok": False,
+                    "session": normalized_session_id,
+                    "message": "LLM 未生成有效回复",
+                }
 
             # 检查生成期间是否有新消息
             current_state = {
@@ -262,10 +310,21 @@ class ProactiveCoreMixin:
                 logger.info(
                     "[主动消息] 检测到用户在LLM生成期间发送了新消息，丢弃本次主动消息喵。"
                 )
-                return
+                return {
+                    "ok": False,
+                    "session": normalized_session_id,
+                    "message": "生成期间检测到用户新消息，已跳过本次主动消息",
+                }
 
             # 发送消息与收尾
-            await self._send_proactive_message(session_id, response_text)
+            delivered = await self._send_proactive_message(session_id, response_text)
+            if not delivered:
+                await self._schedule_next_chat_and_save(session_id)
+                return {
+                    "ok": False,
+                    "session": normalized_session_id,
+                    "message": "消息发送失败，请检查目标平台连接和日志",
+                }
 
             await self._finalize_and_reschedule(
                 session_id,
@@ -282,6 +341,12 @@ class ProactiveCoreMixin:
                 async with self.data_lock:
                     if self._clear_session_schedule_state(session_id):
                         await self._save_data_internal()
+
+            return {
+                "ok": True,
+                "session": normalized_session_id,
+                "message": "消息已发送",
+            }
 
         except Exception as e:
             error_type = type(e).__name__
@@ -324,5 +389,11 @@ class ProactiveCoreMixin:
                         )
                     )
                 )
+
+            return {
+                "ok": False,
+                "session": normalized_session_id,
+                "message": f"主动消息执行失败：{error_msg or error_type}",
+            }
         finally:
             await self._clear_manual_trigger_state(normalized_session_id)
