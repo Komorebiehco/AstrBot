@@ -66,6 +66,30 @@
             libsLoaded: 0,
             pendingScripts: [],
             scriptRunning: false,
+
+            // Plugin Page 的入口 HTML 会带有 asset_token，但通过 JavaScript
+            // 动态创建的 script/fetch 不会自动继承 URL 查询参数；补齐令牌
+            // 后，受保护的插件资源才能在主站 iframe 中正常加载。
+            resolveAssetUrl: function(src) {
+                var value = String(src || '').trim();
+                if (!value || /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(value)) {
+                    return value;
+                }
+
+                try {
+                    var resolved = new URL(value, document.baseURI || window.location.href);
+                    var pageUrl = new URL(window.location.href);
+                    ['asset_token', 'theme'].forEach(function(key) {
+                        var parameter = pageUrl.searchParams.get(key);
+                        if (parameter && !resolved.searchParams.has(key)) {
+                            resolved.searchParams.set(key, parameter);
+                        }
+                    });
+                    return resolved.pathname + resolved.search + resolved.hash;
+                } catch (e) {
+                    return value;
+                }
+            },
             
             // 弹出全局 UI 错误信息并停止加载
             showError: function(msg) {
@@ -99,11 +123,12 @@
             queueScript: function(src, isBabel) {
                 var self = this;
                 this.pendingScripts.push(function() {
+                    var resolvedSrc = self.resolveAssetUrl(src);
                     if (isBabel) {
-                        fetch(src)
+                        fetch(resolvedSrc)
                             .then(function(res) {
                                 if (!res.ok) {
-                                    throw new Error("HTTP error " + res.status);
+                                    throw new Error("HTTP error " + res.status + " for " + resolvedSrc);
                                 }
                                 return res.text();
                             })
@@ -130,17 +155,17 @@
                                 }
                             })
                             .catch(function(err) {
-                                self.showError("Failed to fetch JSX script " + src + ": " + err.message);
+                                self.showError("Failed to fetch JSX script " + resolvedSrc + ": " + err.message);
                             });
                     } else {
                         var s = document.createElement('script');
-                        s.src = src;
+                        s.src = resolvedSrc;
                         s.onload = function() {
                             self.scriptRunning = false;
                             self.triggerPendingScripts();
                         };
                         s.onerror = function() {
-                            self.showError("Failed to load script: " + src);
+                            self.showError("Failed to load script: " + resolvedSrc);
                         };
                         document.body.appendChild(s);
                     }
