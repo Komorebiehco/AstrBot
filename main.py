@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import mimetypes
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -76,6 +77,20 @@ def check_env() -> None:
     os.makedirs(get_astrbot_temp_path(), exist_ok=True)
     os.makedirs(get_astrbot_knowledge_base_path(), exist_ok=True)
     os.makedirs(site_packages_path, exist_ok=True)
+
+    # Overlay maintained plugin code after a persisted data restore. This
+    # updates Page assets without touching user config or plugin data files.
+    bundled_plugins_dir = Path(__file__).resolve().parent / "bundled_plugins"
+    plugin_dir = Path(get_astrbot_plugin_path())
+    if bundled_plugins_dir.is_dir():
+        for bundled_plugin in bundled_plugins_dir.iterdir():
+            if not bundled_plugin.is_dir() or bundled_plugin.name.startswith("."):
+                continue
+            shutil.copytree(
+                bundled_plugin,
+                plugin_dir / bundled_plugin.name,
+                dirs_exist_ok=True,
+            )
 
     # 针对问题 #181 的临时解决方案
     mimetypes.add_type("text/javascript", ".js")
