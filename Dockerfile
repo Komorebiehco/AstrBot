@@ -33,6 +33,10 @@ RUN python -m pip install uv \
     && uv pip install -r requirements.txt --no-cache-dir --system \
     && uv pip install socksio uv pilk --no-cache-dir --system
 
+# Preinstall dependencies restored with the presentation skill so startup can
+# bind the web port without waiting for slow runtime package downloads.
+RUN uv pip install playwright fonttools py7zr pytz --no-cache-dir --system
+
 EXPOSE 6185
 
 CMD ["python", "main.py"]
