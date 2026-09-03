@@ -37,6 +37,8 @@ class NotificationCenter:
         # 防止手动刷新与定时轮询同时发起远端请求，造成重复写缓存。
         self._sync_in_progress = False
         self._sync_state_lock = asyncio.Lock()
+        # Retry once after every process restart so service recovery is automatic.
+        self._remote_sync_blocked = False
         # 统一缓存结构：同步时间、远端通知列表、本地已读映射。
         self._cache: dict[str, Any] = {
             "last_sync_at": None,
@@ -317,6 +319,9 @@ class NotificationCenter:
             }
 
     async def refresh(self) -> bool:
+        if self._remote_sync_blocked:
+            return False
+
         # 若已有同步在跑，则直接跳过，避免多协程重复覆盖缓存。
         async with self._sync_state_lock:
             if self._sync_in_progress:
@@ -345,7 +350,15 @@ class NotificationCenter:
                 await self._save_cache_locked()
                 return changed
         except Exception as e:
-            logger.warning(f"[主动消息] 同步远端通知失败喵: {e} (可忽略)")
+            cause = e.__cause__
+            if isinstance(cause, HTTPError) and cause.code in {401, 403}:
+                self._remote_sync_blocked = True
+                logger.info(
+                    "[Proactive Chat] Remote notification service denied access; "
+                    "polling is paused until the next plugin restart."
+                )
+            else:
+                logger.warning(f"[主动消息] 同步远端通知失败喵: {e} (可忽略)")
             return False
         finally:
             async with self._sync_state_lock:
@@ -366,6 +379,9 @@ class NotificationCenter:
                 await self.plugin.web_admin_server._broadcast_notification_meta_update(
                     "notifications-meta"
                 )
+
+        if self._remote_sync_blocked:
+            return
 
         async def _poll_loop() -> None:
             while True:

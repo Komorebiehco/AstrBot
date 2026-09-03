@@ -2032,9 +2032,11 @@ class WeixinOCAdapter(Platform):
         )
 
     async def run(self) -> None:
+        notified_token: str | None = None
         try:
             while not self._shutdown_event.is_set():
                 if not self.token:
+                    notified_token = None
                     if not self._is_login_session_valid(self._login_session):
                         try:
                             self._login_session = await self._start_login_session()
@@ -2082,6 +2084,28 @@ class WeixinOCAdapter(Platform):
                         await asyncio.sleep(self.qr_poll_interval)
                     continue
 
+                if notified_token != self.token:
+                    notified_token = self.token
+                    try:
+                        notify_payload = await self.client.notify_start()
+                        if self._is_successful_api_payload(notify_payload):
+                            logger.info(
+                                "weixin_oc(%s): online state registered with Weixin.",
+                                self.meta().id,
+                            )
+                        else:
+                            logger.warning(
+                                "weixin_oc(%s): notifyStart returned %s; continuing.",
+                                self.meta().id,
+                                self._format_api_error(notify_payload),
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "weixin_oc(%s): notifyStart failed during startup; continuing: %s",
+                            self.meta().id,
+                            e,
+                        )
+
                 try:
                     await self._poll_inbound_updates()
                 except asyncio.TimeoutError:
@@ -2102,6 +2126,21 @@ class WeixinOCAdapter(Platform):
             logger.exception("weixin_oc(%s): run failed: %s", self.meta().id, e)
         finally:
             await self._cleanup_typing_tasks()
+            if notified_token and self.client.token:
+                try:
+                    notify_payload = await self.client.notify_stop()
+                    if not self._is_successful_api_payload(notify_payload):
+                        logger.warning(
+                            "weixin_oc(%s): notifyStop returned %s; continuing shutdown.",
+                            self.meta().id,
+                            self._format_api_error(notify_payload),
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "weixin_oc(%s): notifyStop failed during shutdown; continuing: %s",
+                        self.meta().id,
+                        e,
+                    )
             await self.client.close()
 
     async def terminate(self) -> None:

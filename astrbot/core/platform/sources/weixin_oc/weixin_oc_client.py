@@ -236,6 +236,50 @@ class WeixinOCClient:
                 return {}
             return cast(dict[str, Any], json.loads(text))
 
+    async def notify_start(self) -> dict[str, Any]:
+        """Notify Weixin that the adapter is online.
+
+        Returns:
+            Parsed Weixin API response.
+
+        Raises:
+            RuntimeError: The Weixin API rejects the request.
+        """
+        return await self.request_json(
+            "POST",
+            "ilink/bot/msg/notifystart",
+            payload={
+                "base_info": {
+                    "channel_version": "astrbot",
+                    "bot_agent": "AstrBot",
+                },
+            },
+            token_required=True,
+            timeout_ms=min(self.api_timeout_ms, 15_000),
+        )
+
+    async def notify_stop(self) -> dict[str, Any]:
+        """Notify Weixin that the adapter is going offline.
+
+        Returns:
+            Parsed Weixin API response.
+
+        Raises:
+            RuntimeError: The Weixin API rejects the request.
+        """
+        return await self.request_json(
+            "POST",
+            "ilink/bot/msg/notifystop",
+            payload={
+                "base_info": {
+                    "channel_version": "astrbot",
+                    "bot_agent": "AstrBot",
+                },
+            },
+            token_required=True,
+            timeout_ms=min(self.api_timeout_ms, 15_000),
+        )
+
     async def get_typing_config(
         self,
         user_id: str,
