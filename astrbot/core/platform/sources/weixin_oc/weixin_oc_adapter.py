@@ -579,6 +579,50 @@ class WeixinOCAdapter(Platform):
             normalized_context_tokens[normalized_user_id] = normalized_context_token
         return normalized_context_tokens
 
+    def _resolve_context_user_id(self, user_id: str) -> str:
+        """Resolve a compatible Weixin user ID to the ID that owns the context token.
+
+        Some persisted proactive-chat configurations contain a shortened domain
+        suffix such as ``@im.wech`` while inbound messages use the full
+        ``@im.wechat`` value.  Only resolve when the local part matches and the
+        context-token map has exactly one compatible candidate; ambiguous IDs
+        are left untouched rather than risking delivery to another contact.
+        """
+        normalized_user_id = str(user_id).strip()
+        if not normalized_user_id or normalized_user_id in self._context_tokens:
+            return normalized_user_id
+
+        if "@" not in normalized_user_id:
+            return normalized_user_id
+        local_part, domain = normalized_user_id.rsplit("@", 1)
+        candidates: list[str] = []
+        for candidate in self._context_tokens:
+            if "@" not in candidate:
+                continue
+            candidate_local, candidate_domain = candidate.rsplit("@", 1)
+            if candidate_local != local_part:
+                continue
+            if (
+                min(len(domain), len(candidate_domain)) >= 6
+                and abs(len(domain) - len(candidate_domain)) <= 4
+                and (
+                    candidate_domain.startswith(domain)
+                    or domain.startswith(candidate_domain)
+                )
+            ):
+                candidates.append(candidate)
+
+        if len(candidates) == 1:
+            resolved = candidates[0]
+            logger.info(
+                "weixin_oc(%s): resolved compatible user ID %s -> %s using context token",
+                self.meta().id,
+                normalized_user_id,
+                resolved,
+            )
+            return resolved
+        return normalized_user_id
+
     def _normalize_pending_text_messages(
         self, raw_messages: list[object]
     ) -> list[dict[str, Any]]:
@@ -1060,6 +1104,9 @@ class WeixinOCAdapter(Platform):
         Returns:
             Whether the message was sent or accepted for delayed delivery.
         """
+        resolved_user_id = self._resolve_context_user_id(user_id)
+        if resolved_user_id != user_id:
+            user_id = resolved_user_id
         if not self.token:
             logger.warning("weixin_oc(%s): missing token, skip send", self.meta().id)
             if queue_on_failure and await self._enqueue_pending_text_message(
@@ -1232,6 +1279,8 @@ class WeixinOCAdapter(Platform):
         user_id: str,
         segment: Image | Video | File,
         text: str | None = None,
+        *,
+        queue_on_failure: bool = True,
     ) -> bool:
         if not self.token:
             logger.warning(
@@ -1278,12 +1327,15 @@ class WeixinOCAdapter(Platform):
             return False
 
         if text:
-            await self._send_items_to_session(
+            text_sent = await self._send_items_to_session(
                 user_id,
                 [self._build_plain_text_item(text)],
                 cache_components=[Plain(text)],
                 cache_message_str=text,
+                queue_on_failure=queue_on_failure,
             )
+            if not text_sent:
+                return False
         return await self._send_items_to_session(
             user_id,
             [media_item],
@@ -1292,6 +1344,7 @@ class WeixinOCAdapter(Platform):
                 [media_item],
                 include_ref_text=False,
             ),
+            queue_on_failure=queue_on_failure,
         )
 
     async def _start_login_session(self) -> OpenClawLoginSession:
@@ -1881,7 +1934,12 @@ class WeixinOCAdapter(Platform):
         return text.strip()
 
     async def _send_to_session(
-        self, user_id: str, text: str, _components: list[Any] | None = None
+        self,
+        user_id: str,
+        text: str,
+        _components: list[Any] | None = None,
+        *,
+        queue_on_failure: bool = True,
     ) -> bool:
         if not text:
             text = self._message_chain_to_text(MessageChain(_components or []))
@@ -1894,6 +1952,7 @@ class WeixinOCAdapter(Platform):
         return await self._send_items_to_session(
             user_id,
             [self._build_plain_text_item(text)],
+            queue_on_failure=queue_on_failure,
         )
 
     async def send_by_session(
@@ -1901,7 +1960,8 @@ class WeixinOCAdapter(Platform):
         session: MessageSesion,
         message_chain: MessageChain,
     ) -> None:
-        target_user = session.session_id
+        target_user = self._resolve_context_user_id(session.session_id)
+        queue_on_failure = bool(getattr(session, "allow_delayed_delivery", True))
         pending_text = ""
         has_supported_segment = False
         failed_segments = 0
@@ -1916,6 +1976,7 @@ class WeixinOCAdapter(Platform):
                     target_user,
                     segment,
                     text=pending_text.strip() or None,
+                    queue_on_failure=queue_on_failure,
                 )
                 if not sent:
                     failed_segments += 1
@@ -1930,7 +1991,11 @@ class WeixinOCAdapter(Platform):
 
         if pending_text:
             has_supported_segment = True
-            sent = await self._send_to_session(target_user, pending_text.strip())
+            sent = await self._send_to_session(
+                target_user,
+                pending_text.strip(),
+                queue_on_failure=queue_on_failure,
+            )
             if not sent:
                 failed_segments += 1
 

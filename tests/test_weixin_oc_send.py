@@ -26,6 +26,29 @@ def _make_adapter(*responses: dict) -> WeixinOCAdapter:
     return adapter
 
 
+def test_resolve_context_user_id_recovers_unique_shortened_domain():
+    adapter = _make_adapter()
+    adapter._context_tokens = {
+        "o9cq808EMikgb31Ir3fvML5CYoX8@im.wechat": "context-token"
+    }
+
+    resolved = adapter._resolve_context_user_id(
+        "o9cq808EMikgb31Ir3fvML5CYoX8@im.wech"
+    )
+
+    assert resolved == "o9cq808EMikgb31Ir3fvML5CYoX8@im.wechat"
+
+
+def test_resolve_context_user_id_keeps_ambiguous_candidate_unchanged():
+    adapter = _make_adapter()
+    adapter._context_tokens = {
+        "user@im.wechat": "context-token-a",
+        "user@im.wechat2": "context-token-b",
+    }
+
+    assert adapter._resolve_context_user_id("user@im.wech") == "user@im.wech"
+
+
 @pytest.mark.asyncio
 async def test_sendmessage_retries_transient_prepare_failure(monkeypatch):
     adapter = _make_adapter(
@@ -151,6 +174,27 @@ async def test_missing_context_queues_plain_text_for_delayed_delivery():
     assert result is True
     assert [entry["text"] for entry in adapter._pending_text_messages] == ["delayed"]
     adapter._save_account_state.assert_awaited_once()
+    adapter.client.request_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_by_session_can_require_immediate_delivery():
+    adapter = _make_adapter()
+    adapter._context_tokens = {}
+    session = SimpleNamespace(
+        session_id="user",
+        allow_delayed_delivery=False,
+    )
+
+    with pytest.raises(RuntimeError, match="failed to send 1 message segment"):
+        await adapter.send_by_session(
+            session,
+            weixin_oc_adapter.MessageChain(
+                [weixin_oc_adapter.Plain("proactive message")]
+            ),
+        )
+
+    adapter._enqueue_pending_text_message.assert_not_awaited()
     adapter.client.request_json.assert_not_awaited()
 
 

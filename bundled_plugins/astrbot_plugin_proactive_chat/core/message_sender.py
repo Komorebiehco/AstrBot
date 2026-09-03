@@ -362,6 +362,11 @@ class SenderMixin:
 
         try:
             session_obj = MS(platform_name=p_id, message_type=m_type, session_id=t_id)
+            # A proactive trigger must report success only after the adapter has
+            # accepted an immediate delivery. Weixin may otherwise enqueue text
+            # until the user speaks again, which is useful for normal replies but
+            # must not be presented as a delivered proactive message.
+            setattr(session_obj, "allow_delayed_delivery", False)
             await target_platform.send_by_session(session_obj, chain)
             logger.debug(f"[主动消息] 消息将通过平台 {p_id} 送达喵")
             if p_id != "webchat":
