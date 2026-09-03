@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import zoneinfo
 from typing import Any
@@ -40,6 +41,46 @@ class LifecycleMixin:
         """插件的异步初始化函数。"""
         # 初始化共享锁
         self.data_lock = asyncio.Lock()
+
+        # Render may restore an older snapshot whose proactive recipient list is
+        # empty. An explicit environment fallback repairs only that empty state;
+        # any recipient list saved through the WebUI always takes precedence.
+        bootstrapped_friend_sessions: list[str] = []
+        friend_settings = self.config.get("friend_settings", {})
+        fallback_sessions = os.environ.get(
+            "ASTRBOT_PROACTIVE_CHAT_FRIEND_SESSIONS", ""
+        )
+        if (
+            isinstance(friend_settings, dict)
+            and friend_settings.get("enable", False)
+            and not friend_settings.get("session_list")
+            and fallback_sessions.strip()
+        ):
+            for raw_session in fallback_sessions.replace("\n", ",").split(","):
+                session_id = raw_session.strip()
+                parsed = self._parse_session_id(session_id)
+                if (
+                    session_id
+                    and parsed
+                    and ("Friend" in parsed[1] or "Private" in parsed[1])
+                    and session_id not in bootstrapped_friend_sessions
+                ):
+                    bootstrapped_friend_sessions.append(session_id)
+
+            if bootstrapped_friend_sessions:
+                friend_settings["session_list"] = bootstrapped_friend_sessions
+                self.config["friend_settings"] = friend_settings
+                try:
+                    if hasattr(self.config, "save_config"):
+                        self.config.save_config()
+                except Exception as e:
+                    logger.warning(
+                        f"[主动消息] 保存环境变量恢复的私聊会话失败喵: {e}"
+                    )
+                logger.warning(
+                    "[主动消息] 私聊会话列表为空，已从显式环境变量恢复 "
+                    f"{len(bootstrapped_friend_sessions)} 个会话喵。"
+                )
 
         # 配置校验（异常不阻断启动）
         try:
@@ -110,6 +151,10 @@ class LifecycleMixin:
 
         # 先恢复持久化任务，再初始化自动触发器，避免重复调度
         await self._init_jobs_from_data()
+        for session_id in bootstrapped_friend_sessions:
+            normalized_session_id = self._normalize_session_id(session_id)
+            if self.scheduler.get_job(normalized_session_id) is None:
+                await self._schedule_next_chat_and_save(normalized_session_id)
         logger.info("[主动消息] 调度器已初始化喵。")
 
         await self._setup_auto_triggers_for_enabled_sessions()
