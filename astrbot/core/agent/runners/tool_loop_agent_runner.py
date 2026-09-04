@@ -1127,8 +1127,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 requested_url = str(func_tool_args.get("url") or "").strip()
                 prompt_text = str(req.prompt or "")
                 prompt_has_explicit_url = (
-                    requested_url
-                    and requested_url.lower() in prompt_text.lower()
+                    requested_url and requested_url.lower() in prompt_text.lower()
                 )
                 placeholder_url = (
                     not requested_url

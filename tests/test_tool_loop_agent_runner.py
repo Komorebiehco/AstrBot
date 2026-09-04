@@ -612,6 +612,131 @@ async def test_tool_loop_next_request_includes_tool_result(
 
 
 @pytest.mark.asyncio
+async def test_search_image_tool_uses_attached_request_image_over_placeholder_url(
+    runner, mock_hooks
+):
+    """Attached images must win over model-generated placeholder URLs."""
+
+    captured_args: dict[str, Any] = {}
+
+    class CapturingExecutor:
+        @staticmethod
+        def execute(tool, run_context, **tool_args):
+            del tool, run_context
+            captured_args.update(tool_args)
+
+            async def generator():
+                from mcp.types import CallToolResult, TextContent
+
+                yield CallToolResult(
+                    content=[TextContent(type="text", text="matched anime")]
+                )
+
+            return generator()
+
+    tool = FunctionTool(
+        name="search_image",
+        description="Search an image",
+        parameters={
+            "type": "object",
+            "properties": {
+                "type": {"type": "string"},
+                "url": {"type": "string"},
+            },
+        },
+        handler=AsyncMock(),
+    )
+    request = ProviderRequest(
+        prompt="这是什么番？",
+        image_urls=["/AstrBot/data/temp/weixin-anime.png"],
+        func_tool=ToolSet(tools=[tool]),
+        contexts=[],
+    )
+    response = LLMResponse(
+        role="assistant",
+        tools_call_name=["search_image"],
+        tools_call_args=[
+            {"type": "anime", "url": "https://example.com"},
+        ],
+        tools_call_ids=["call_search_image"],
+    )
+
+    await runner.reset(
+        provider=MockProvider(),
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=CapturingExecutor(),
+        agent_hooks=mock_hooks,
+        streaming=False,
+    )
+    async for _ in runner._handle_function_tools(request, response):
+        pass
+
+    assert captured_args["url"] == request.image_urls[0]
+
+
+@pytest.mark.asyncio
+async def test_search_image_tool_preserves_explicit_user_url(runner, mock_hooks):
+    """An explicit URL in the user's prompt must remain authoritative."""
+
+    captured_args: dict[str, Any] = {}
+
+    class CapturingExecutor:
+        @staticmethod
+        def execute(tool, run_context, **tool_args):
+            del tool, run_context
+            captured_args.update(tool_args)
+
+            async def generator():
+                from mcp.types import CallToolResult, TextContent
+
+                yield CallToolResult(
+                    content=[TextContent(type="text", text="matched anime")]
+                )
+
+            return generator()
+
+    tool = FunctionTool(
+        name="search_image",
+        description="Search an image",
+        parameters={
+            "type": "object",
+            "properties": {
+                "type": {"type": "string"},
+                "url": {"type": "string"},
+            },
+        },
+        handler=AsyncMock(),
+    )
+    explicit_url = "https://images.example.test/anime.png"
+    request = ProviderRequest(
+        prompt=f"请搜索这张图片 {explicit_url}",
+        image_urls=["/AstrBot/data/temp/weixin-anime.png"],
+        func_tool=ToolSet(tools=[tool]),
+        contexts=[],
+    )
+    response = LLMResponse(
+        role="assistant",
+        tools_call_name=["search_image"],
+        tools_call_args=[{"type": "anime", "url": explicit_url}],
+        tools_call_ids=["call_search_image_explicit"],
+    )
+
+    await runner.reset(
+        provider=MockProvider(),
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=CapturingExecutor(),
+        agent_hooks=mock_hooks,
+        streaming=False,
+    )
+    async for _ in runner._handle_function_tools(request, response):
+        pass
+
+    assert captured_args["url"] == explicit_url
+
+
+@pytest.mark.asyncio
 async def test_normal_completion_without_max_step(
     runner, mock_provider, provider_request, mock_tool_executor, mock_hooks
 ):
