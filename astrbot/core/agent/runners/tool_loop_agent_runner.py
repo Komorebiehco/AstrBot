@@ -1110,6 +1110,39 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             llm_response.tools_call_args,
             llm_response.tools_call_ids,
         ):
+            if func_tool_args is None:
+                func_tool_args = {}
+            else:
+                # Providers may reuse the decoded arguments object; do not mutate it
+                # while repairing a tool call for the current request.
+                func_tool_args = dict(func_tool_args)
+
+            # The search-anime plugin accepts an image URL/path because that is
+            # convenient for slash commands.  For an attachment-based chat request,
+            # however, a model may invent a placeholder URL (for example,
+            # ``https://example.com``) simply to satisfy the required schema.  The
+            # request already contains the real local image path, so prefer it unless
+            # the user explicitly supplied the URL in the prompt.
+            if func_tool_name == "search_image" and req.image_urls:
+                requested_url = str(func_tool_args.get("url") or "").strip()
+                prompt_text = str(req.prompt or "")
+                prompt_has_explicit_url = (
+                    requested_url
+                    and requested_url.lower() in prompt_text.lower()
+                )
+                placeholder_url = (
+                    not requested_url
+                    or requested_url.lower() in {"none", "null"}
+                    or requested_url.lower().startswith(
+                        ("https://example.com", "http://example.com")
+                    )
+                )
+                if placeholder_url or not prompt_has_explicit_url:
+                    func_tool_args["url"] = req.image_urls[0]
+                    logger.info(
+                        "Repaired search_image URL from the current request image"
+                    )
+
             tool_result_blocks_start = len(tool_call_result_blocks)
             tool_call_streak = self._track_tool_call_streak(
                 func_tool_name,
@@ -1146,9 +1179,6 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     func_tool = req.func_tool.get_tool(func_tool_name)
                     available_tools = req.func_tool.names()
 
-                #  Some API may return None for tools with no parameters
-                if func_tool_args is None:
-                    func_tool_args = {}
                 logger.info(f"使用工具：{func_tool_name}，参数：{func_tool_args}")
 
                 if not func_tool:
