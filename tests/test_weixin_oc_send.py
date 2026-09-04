@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from astrbot.core.message.components import Image, Node, Nodes, Plain
 from astrbot.core.platform.sources.weixin_oc import weixin_oc_adapter
 from astrbot.core.platform.sources.weixin_oc.weixin_oc_adapter import WeixinOCAdapter
 
@@ -13,7 +14,7 @@ def _make_adapter(*responses: dict) -> WeixinOCAdapter:
     adapter = object.__new__(WeixinOCAdapter)
     adapter.token = "token"
     adapter.account_id = "account"
-    adapter.metadata = SimpleNamespace(id="weixin-test")
+    adapter.metadata = SimpleNamespace(id="weixin-test", name="weixin_oc")
     adapter._context_tokens = {"user": "context-token"}
     adapter._sendmessage_lock = asyncio.Lock()
     adapter._pending_text_message_lock = asyncio.Lock()
@@ -32,9 +33,7 @@ def test_resolve_context_user_id_recovers_unique_shortened_domain():
         "o9cq808EMikgb31Ir3fvML5CYoX8@im.wechat": "context-token"
     }
 
-    resolved = adapter._resolve_context_user_id(
-        "o9cq808EMikgb31Ir3fvML5CYoX8@im.wech"
-    )
+    resolved = adapter._resolve_context_user_id("o9cq808EMikgb31Ir3fvML5CYoX8@im.wech")
 
     assert resolved == "o9cq808EMikgb31Ir3fvML5CYoX8@im.wechat"
 
@@ -196,6 +195,40 @@ async def test_send_by_session_can_require_immediate_delivery():
 
     adapter._enqueue_pending_text_message.assert_not_awaited()
     adapter.client.request_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_by_session_expands_forward_nodes_for_weixin():
+    adapter = _make_adapter()
+    adapter._send_media_segment = AsyncMock(return_value=True)
+    adapter._send_to_session = AsyncMock(return_value=True)
+    image = Image(file="https://example.com/comparison.jpg")
+    session = SimpleNamespace(session_id="user", allow_delayed_delivery=True)
+    chain = weixin_oc_adapter.MessageChain(
+        [
+            Nodes(
+                [
+                    Node(content=[Plain("Anime search results")]),
+                    Node(content=[Plain("Title: Example Anime"), image]),
+                    Node(content=[Plain("Similarity: 98.5%")]),
+                ]
+            )
+        ]
+    )
+
+    await adapter.send_by_session(session, chain)
+
+    adapter._send_media_segment.assert_awaited_once_with(
+        "user",
+        image,
+        text="Anime search results\n\nTitle: Example Anime",
+        queue_on_failure=True,
+    )
+    adapter._send_to_session.assert_awaited_once_with(
+        "user",
+        "Similarity: 98.5%",
+        queue_on_failure=True,
+    )
 
 
 @pytest.mark.asyncio

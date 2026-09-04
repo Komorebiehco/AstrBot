@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from astrbot import logger
 from astrbot.core.agent.runners.tool_loop_agent_runner import FollowUpTicket
 from astrbot.core.astr_agent_run_util import AgentRunner
+from astrbot.core.message.components import File, Image, Record, Reply, Video
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.utils.active_event_registry import active_event_registry
 
@@ -188,6 +189,15 @@ def try_capture_follow_up(event: AstrMessageEvent) -> FollowUpCapture | None:
         return None
 
     if runner_event.get_extra("agent_stop_requested"):
+        return None
+    if any(
+        isinstance(component, (Image, File, Record, Video, Reply))
+        for component in event.message_obj.message
+    ):
+        logger.info(
+            "Preserving rich follow-up message for normal processing, umo=%s",
+            event.unified_msg_origin,
+        )
         return None
 
     ticket = runner.follow_up(message_text=_event_follow_up_text(event))

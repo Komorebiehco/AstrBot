@@ -17,7 +17,16 @@ import qrcode as qrcode_lib
 
 from astrbot import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import File, Image, Plain, Record, Reply, Video
+from astrbot.api.message_components import (
+    File,
+    Image,
+    Node,
+    Nodes,
+    Plain,
+    Record,
+    Reply,
+    Video,
+)
 from astrbot.api.platform import (
     AstrBotMessage,
     MessageMember,
@@ -1965,7 +1974,18 @@ class WeixinOCAdapter(Platform):
         pending_text = ""
         has_supported_segment = False
         failed_segments = 0
+        expanded_segments: list[Any] = []
         for segment in message_chain.chain:
+            nodes = segment.nodes if isinstance(segment, Nodes) else [segment]
+            for node_index, node in enumerate(nodes):
+                if node_index > 0:
+                    expanded_segments.append(Plain("\n\n"))
+                if isinstance(node, Node):
+                    expanded_segments.extend(node.content)
+                else:
+                    expanded_segments.append(node)
+
+        for segment in expanded_segments:
             if isinstance(segment, Plain):
                 pending_text += segment.text
                 continue
