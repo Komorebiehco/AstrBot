@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from astrbot.core.message.components import File, Image, Plain, Reply
+from astrbot.core.message.components import File, Image, Node, Nodes, Plain, Reply
 from astrbot.core.pipeline.process_stage.follow_up import (
     register_active_runner,
     try_capture_follow_up,
@@ -198,6 +198,40 @@ def test_rich_follow_up_preserves_original_message_for_normal_processing(
         components=components,
         message_str=message_str,
         message_id="rich-follow-up",
+    )
+    active_event = StubEvent(event.unified_msg_origin, message_id="active-run")
+    runner = SimpleNamespace(
+        run_context=SimpleNamespace(context=SimpleNamespace(event=active_event)),
+        request_stop=Mock(),
+        follow_up=Mock(),
+    )
+    register_active_runner(event.unified_msg_origin, runner)
+
+    try:
+        assert try_capture_follow_up(event) is None
+        runner.follow_up.assert_not_called()
+        assert event.message_obj.message == components
+    finally:
+        unregister_active_runner(event.unified_msg_origin, runner)
+
+
+def test_nested_rich_follow_up_preserves_original_message_for_normal_processing() -> (
+    None
+):
+    """Media nested inside forwarded nodes must not be reduced to plain text."""
+    image = Image(file="file:///tmp/nested-anime.jpg")
+    components = [
+        Nodes(
+            [
+                Node(content=[Plain("caption"), Nodes([Node(content=[image])])]),
+            ]
+        )
+    ]
+    event = StubEvent(
+        "weixin:FriendMessage:nested-rich",
+        components=components,
+        message_str="caption",
+        message_id="nested-rich-follow-up",
     )
     active_event = StubEvent(event.unified_msg_origin, message_id="active-run")
     runner = SimpleNamespace(

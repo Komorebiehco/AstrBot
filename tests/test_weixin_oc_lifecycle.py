@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from astrbot.core.platform.sources.weixin_oc import weixin_oc_adapter
 from astrbot.core.platform.sources.weixin_oc.weixin_oc_adapter import WeixinOCAdapter
 from astrbot.core.platform.sources.weixin_oc.weixin_oc_client import WeixinOCClient
 
@@ -62,5 +63,47 @@ async def test_adapter_registers_online_state_and_stops_cleanly():
     await adapter.run()
 
     adapter.client.notify_start.assert_awaited_once_with()
+    adapter.client.notify_stop.assert_awaited_once_with()
+    adapter.client.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_adapter_retries_online_state_registration_after_failure(monkeypatch):
+    adapter = object.__new__(WeixinOCAdapter)
+    adapter.token = "token"
+    adapter._shutdown_event = asyncio.Event()
+    adapter._login_session = None
+    adapter.client = SimpleNamespace(
+        token="token",
+        notify_start=AsyncMock(
+            side_effect=[
+                {"ret": -1, "errmsg": "temporary failure"},
+                {"ret": 0},
+            ]
+        ),
+        notify_stop=AsyncMock(return_value={"ret": 0}),
+        close=AsyncMock(),
+    )
+    adapter.meta = lambda: SimpleNamespace(id="weixin-test")
+    adapter._cleanup_typing_tasks = AsyncMock()
+    monotonic_values = iter((0.0, 6.0, 12.0))
+    monkeypatch.setattr(
+        weixin_oc_adapter.time,
+        "monotonic",
+        lambda: next(monotonic_values, 1000.0),
+    )
+    poll_count = 0
+
+    async def poll_once():
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 2:
+            adapter._shutdown_event.set()
+
+    adapter._poll_inbound_updates = poll_once
+
+    await adapter.run()
+
+    assert adapter.client.notify_start.await_count == 2
     adapter.client.notify_stop.assert_awaited_once_with()
     adapter.client.close.assert_awaited_once_with()

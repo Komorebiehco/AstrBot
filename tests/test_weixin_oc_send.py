@@ -313,6 +313,70 @@ async def test_send_by_session_expands_forward_nodes_for_weixin():
 
 
 @pytest.mark.asyncio
+async def test_send_by_session_expands_nested_forward_nodes_for_weixin():
+    adapter = _make_adapter()
+    adapter._send_media_segment = AsyncMock(return_value=True)
+    adapter._send_to_session = AsyncMock(return_value=True)
+    image = Image(file="https://example.com/nested.jpg")
+    session = SimpleNamespace(session_id="user", allow_delayed_delivery=True)
+    chain = weixin_oc_adapter.MessageChain(
+        [
+            Nodes(
+                [
+                    Node(
+                        content=[
+                            Plain("Nested title"),
+                            Nodes(
+                                [
+                                    Node(content=[Plain("Nested detail"), image]),
+                                ]
+                            ),
+                        ]
+                    ),
+                    Node(content=[Plain("Nested footer")]),
+                ]
+            )
+        ]
+    )
+
+    await adapter.send_by_session(session, chain)
+
+    adapter._send_media_segment.assert_awaited_once_with(
+        "user",
+        image,
+        text="Nested titleNested detail",
+        queue_on_failure=True,
+    )
+    adapter._send_to_session.assert_awaited_once_with(
+        "user",
+        "Nested footer",
+        queue_on_failure=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_media_failure_keeps_caption_as_text_fallback():
+    adapter = _make_adapter()
+    adapter._resolve_media_file_path = AsyncMock(return_value=None)
+    adapter._send_to_session = AsyncMock(return_value=True)
+    session = SimpleNamespace(session_id="user", allow_delayed_delivery=True)
+
+    with pytest.raises(RuntimeError, match="failed to send 1 message segment"):
+        await adapter.send_by_session(
+            session,
+            weixin_oc_adapter.MessageChain(
+                [Plain("caption"), Image(file="file:///missing/image.jpg")]
+            ),
+        )
+
+    adapter._send_to_session.assert_awaited_once_with(
+        "user",
+        "caption",
+        queue_on_failure=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_missing_context_does_not_queue_media_payload(monkeypatch):
     adapter = _make_adapter(
         *[

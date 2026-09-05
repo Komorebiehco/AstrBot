@@ -1341,6 +1341,12 @@ class WeixinOCAdapter(Platform):
             logger.warning(
                 "weixin_oc(%s): missing token, skip media send", self.meta().id
             )
+            if text:
+                await self._send_to_session(
+                    user_id,
+                    text,
+                    queue_on_failure=queue_on_failure,
+                )
             return False
         media_path = await self._resolve_media_file_path(segment)
         if media_path is None:
@@ -1348,6 +1354,12 @@ class WeixinOCAdapter(Platform):
                 "weixin_oc(%s): skip media segment, media file not resolvable",
                 self.meta().id,
             )
+            if text:
+                await self._send_to_session(
+                    user_id,
+                    text,
+                    queue_on_failure=queue_on_failure,
+                )
             return False
 
         item_type = self.IMAGE_ITEM_TYPE
@@ -1379,6 +1391,12 @@ class WeixinOCAdapter(Platform):
                 e,
                 exc_info=True,
             )
+            if text:
+                await self._send_to_session(
+                    user_id,
+                    text,
+                    queue_on_failure=queue_on_failure,
+                )
             return False
 
         if text:
@@ -2022,14 +2040,20 @@ class WeixinOCAdapter(Platform):
         failed_segments = 0
         expanded_segments: list[Any] = []
         for segment in message_chain.chain:
-            nodes = segment.nodes if isinstance(segment, Nodes) else [segment]
-            for node_index, node in enumerate(nodes):
-                if node_index > 0:
-                    expanded_segments.append(Plain("\n\n"))
-                if isinstance(node, Node):
-                    expanded_segments.extend(node.content)
+
+            def expand(component: Any):
+                if isinstance(component, Nodes):
+                    for node_index, node in enumerate(component.nodes):
+                        if node_index > 0:
+                            yield Plain("\n\n")
+                        yield from expand(node)
+                elif isinstance(component, Node):
+                    for child in component.content:
+                        yield from expand(child)
                 else:
-                    expanded_segments.append(node)
+                    yield component
+
+            expanded_segments.extend(expand(segment))
 
         for segment in expanded_segments:
             if isinstance(segment, Plain):
@@ -2099,10 +2123,12 @@ class WeixinOCAdapter(Platform):
 
     async def run(self) -> None:
         notified_token: str | None = None
+        notify_retry_at = 0.0
         try:
             while not self._shutdown_event.is_set():
                 if not self.token:
                     notified_token = None
+                    notify_retry_at = 0.0
                     if not self._is_login_session_valid(self._login_session):
                         try:
                             self._login_session = await self._start_login_session()
@@ -2150,11 +2176,16 @@ class WeixinOCAdapter(Platform):
                         await asyncio.sleep(self.qr_poll_interval)
                     continue
 
-                if notified_token != self.token:
-                    notified_token = self.token
+                if notified_token != self.token and time.monotonic() >= notify_retry_at:
+                    token_to_notify = self.token
                     try:
                         notify_payload = await self.client.notify_start()
-                        if self._is_successful_api_payload(notify_payload):
+                        if (
+                            token_to_notify == self.token
+                            and self._is_successful_api_payload(notify_payload)
+                        ):
+                            notified_token = token_to_notify
+                            notify_retry_at = 0.0
                             logger.info(
                                 "weixin_oc(%s): online state registered with Weixin.",
                                 self.meta().id,
@@ -2165,12 +2196,14 @@ class WeixinOCAdapter(Platform):
                                 self.meta().id,
                                 self._format_api_error(notify_payload),
                             )
+                            notify_retry_at = time.monotonic() + 5.0
                     except Exception as e:
                         logger.warning(
                             "weixin_oc(%s): notifyStart failed during startup; continuing: %s",
                             self.meta().id,
                             e,
                         )
+                        notify_retry_at = time.monotonic() + 5.0
 
                 try:
                     await self._poll_inbound_updates()
