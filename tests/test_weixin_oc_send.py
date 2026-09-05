@@ -16,6 +16,8 @@ def _make_adapter(*responses: dict) -> WeixinOCAdapter:
     adapter.account_id = "account"
     adapter.metadata = SimpleNamespace(id="weixin-test", name="weixin_oc")
     adapter._context_tokens = {"user": "context-token"}
+    adapter._context_tokens_dirty = False
+    adapter._context_tokens_revision = 0
     adapter._sendmessage_lock = asyncio.Lock()
     adapter._pending_text_message_lock = asyncio.Lock()
     adapter._last_sendmessage_request_at = 0.0
@@ -79,6 +81,7 @@ async def test_sendmessage_stops_after_transient_retry_limit(monkeypatch):
         for _ in range(len(WeixinOCAdapter.SENDMESSAGE_RETRY_DELAYS_S) + 1)
     ]
     adapter = _make_adapter(*responses)
+    adapter._save_account_state = AsyncMock()
     sleep = AsyncMock()
     monkeypatch.setattr(weixin_oc_adapter.asyncio, "sleep", sleep)
 
@@ -90,7 +93,38 @@ async def test_sendmessage_stops_after_transient_retry_limit(monkeypatch):
     assert result is False
     assert adapter.client.request_json.await_count == len(responses)
     assert sleep.await_count == len(adapter.SENDMESSAGE_RETRY_DELAYS_S)
+    assert "user" not in adapter._context_tokens
+    assert adapter._context_tokens_revision == 1
+    adapter._save_account_state.assert_awaited_once()
     adapter._cache_recent_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_preserves_context_refreshed_during_send(monkeypatch):
+    adapter = _make_adapter()
+    adapter._save_account_state = AsyncMock()
+    response_count = 0
+
+    async def fail_with_context_refresh(*args, **kwargs):
+        nonlocal response_count
+        response_count += 1
+        if response_count == len(adapter.SENDMESSAGE_RETRY_DELAYS_S) + 1:
+            adapter._context_tokens["user"] = "refreshed-context-token"
+        return {"ret": -2, "errcode": 0, "errmsg": "prepare failed"}
+
+    adapter.client.request_json = AsyncMock(side_effect=fail_with_context_refresh)
+    monkeypatch.setattr(weixin_oc_adapter.asyncio, "sleep", AsyncMock())
+
+    result = await adapter._send_items_to_session(
+        "user",
+        [adapter._build_plain_text_item("hello")],
+        queue_on_failure=False,
+    )
+
+    assert result is False
+    assert adapter._context_tokens["user"] == "refreshed-context-token"
+    assert adapter._context_tokens_revision == 0
+    adapter._save_account_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -271,6 +305,8 @@ async def test_retry_exhaustion_queues_plain_text(monkeypatch):
     )
 
     assert result is True
+    assert "user" not in adapter._context_tokens
+    assert adapter._context_tokens_revision == 1
     assert [entry["text"] for entry in adapter._pending_text_messages] == ["delayed"]
     adapter._save_account_state.assert_awaited_once()
 
@@ -297,3 +333,67 @@ async def test_context_refresh_drains_and_removes_queued_text():
     adapter._send_items_to_session.assert_awaited_once()
     assert adapter._send_items_to_session.await_args.kwargs["queue_on_failure"] is False
     adapter._save_account_state.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_context_refresh_drains_queued_text_for_compatible_user_id():
+    adapter = _make_adapter()
+    full_user_id = "user@im.wechat"
+    adapter._context_tokens = {full_user_id: "refreshed-context-token"}
+    adapter._pending_text_messages = [
+        {
+            "id": "pending-1",
+            "user_id": "user@im.wech",
+            "text": "delayed",
+            "created_at": int(time.time()),
+        }
+    ]
+    adapter._pending_text_messages_dirty = False
+    adapter._pending_text_messages_revision = 0
+    adapter._send_items_to_session = AsyncMock(return_value=True)
+    adapter._save_account_state = AsyncMock()
+
+    await adapter._drain_pending_text_messages(full_user_id)
+
+    assert adapter._pending_text_messages == []
+    adapter._send_items_to_session.assert_awaited_once_with(
+        full_user_id,
+        [adapter._build_plain_text_item("delayed")],
+        cache_components=[Plain("delayed")],
+        cache_message_str="delayed",
+        queue_on_failure=False,
+    )
+    adapter._save_account_state.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_inbound_context_refresh_schedules_compatible_queue_delivery():
+    adapter = _make_adapter()
+    full_user_id = "user@im.wechat"
+    adapter._context_tokens = {}
+    adapter._pending_text_messages = [
+        {
+            "id": "pending-1",
+            "user_id": "user@im.wech",
+            "text": "delayed",
+            "created_at": int(time.time()),
+        }
+    ]
+    adapter._pending_drain_user_ids = set()
+    adapter._item_list_to_components = AsyncMock(return_value=[])
+    adapter._cache_recent_message = MagicMock()
+    adapter.create_event = MagicMock(return_value=object())
+    adapter.commit_event = MagicMock()
+
+    await adapter._handle_inbound_message(
+        {
+            "from_user_id": full_user_id,
+            "context_token": "refreshed-context-token",
+            "item_list": [],
+            "message_id": "message-1",
+            "create_time": int(time.time()),
+        }
+    )
+
+    assert adapter._context_tokens[full_user_id] == "refreshed-context-token"
+    assert full_user_id in adapter._pending_drain_user_ids

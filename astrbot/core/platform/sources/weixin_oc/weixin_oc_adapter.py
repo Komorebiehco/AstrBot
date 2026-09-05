@@ -784,7 +784,11 @@ class WeixinOCAdapter(Platform):
                 self._pending_text_messages_revision += 1
                 self._pending_text_messages_dirty = True
                 await self._save_account_state()
-            pending = [entry for entry in normalized if entry["user_id"] == user_id]
+            pending = [
+                entry
+                for entry in normalized
+                if self._resolve_context_user_id(entry["user_id"]) == user_id
+            ]
 
         delivered_ids: set[str] = set()
         for entry in pending:
@@ -1195,12 +1199,24 @@ class WeixinOCAdapter(Platform):
                         user_id,
                         self._format_api_error(response_payload),
                     )
+                    if ret == -2 and self._context_tokens.get(user_id) == context_token:
+                        # Do not discard a newer token that arrived while retries were sleeping.
+                        self._context_tokens.pop(user_id, None)
+                        self._context_tokens_revision += 1
+                        self._context_tokens_dirty = True
+                        logger.warning(
+                            "weixin_oc(%s): invalidated stale context token for %s; waiting for the next inbound message",
+                            self.meta().id,
+                            user_id,
+                        )
                     if (
                         ret == -2
                         and queue_on_failure
                         and await self._enqueue_pending_text_message(user_id, item_list)
                     ):
                         return True
+                    if self._context_tokens_dirty:
+                        await self._save_account_state()
                     return False
 
                 delay = self.SENDMESSAGE_RETRY_DELAYS_S[attempt]
@@ -1815,7 +1831,7 @@ class WeixinOCAdapter(Platform):
                 self._context_tokens_revision += 1
                 self._context_tokens_dirty = True
             if any(
-                entry["user_id"] == from_user_id
+                self._resolve_context_user_id(entry["user_id"]) == from_user_id
                 for entry in self._pending_text_messages
             ):
                 self._pending_drain_user_ids.add(from_user_id)
