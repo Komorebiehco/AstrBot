@@ -97,6 +97,7 @@ async def test_sendmessage_stops_after_transient_retry_limit(monkeypatch):
     assert adapter._context_tokens_revision == 1
     adapter._save_account_state.assert_awaited_once()
     adapter._cache_recent_message.assert_not_called()
+    adapter._enqueue_pending_text_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -402,7 +403,7 @@ async def test_missing_context_does_not_queue_media_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_retry_exhaustion_queues_plain_text(monkeypatch):
+async def test_retry_exhaustion_can_explicitly_retain_plain_text(monkeypatch):
     responses = [
         {"ret": -2, "errcode": 0, "errmsg": "prepare failed"}
         for _ in range(len(WeixinOCAdapter.SENDMESSAGE_RETRY_DELAYS_S) + 1)
@@ -418,6 +419,7 @@ async def test_retry_exhaustion_queues_plain_text(monkeypatch):
     result = await adapter._send_items_to_session(
         "user",
         [adapter._build_plain_text_item("delayed")],
+        queue_on_failure=True,
     )
 
     assert result is True
@@ -483,7 +485,7 @@ async def test_context_refresh_drains_queued_text_for_compatible_user_id():
 
 
 @pytest.mark.asyncio
-async def test_inbound_context_refresh_schedules_compatible_queue_delivery():
+async def test_inbound_context_refresh_does_not_replay_legacy_queue():
     adapter = _make_adapter()
     full_user_id = "user@im.wechat"
     adapter._context_tokens = {}
@@ -492,10 +494,11 @@ async def test_inbound_context_refresh_schedules_compatible_queue_delivery():
             "id": "pending-1",
             "user_id": "user@im.wech",
             "text": "delayed",
-            "created_at": int(time.time()),
+            "created_at": int(time.time()) - 2 * 24 * 60 * 60,
         }
     ]
-    adapter._pending_drain_user_ids = set()
+    retained = list(adapter._pending_text_messages)
+    adapter._drain_pending_text_messages = AsyncMock()
     adapter._item_list_to_components = AsyncMock(return_value=[])
     adapter._cache_recent_message = MagicMock()
     adapter.create_event = MagicMock(return_value=object())
@@ -512,4 +515,61 @@ async def test_inbound_context_refresh_schedules_compatible_queue_delivery():
     )
 
     assert adapter._context_tokens[full_user_id] == "refreshed-context-token"
-    assert full_user_id in adapter._pending_drain_user_ids
+    assert adapter._pending_text_messages == retained
+    assert not getattr(adapter, "_pending_drain_user_ids", set())
+    adapter._drain_pending_text_messages.assert_not_awaited()
+    adapter.commit_event.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_default_session_does_not_accept_failed_reply_as_delivered():
+    adapter = _make_adapter()
+    adapter.token = None
+    adapter._enqueue_pending_text_message.return_value = True
+
+    with pytest.raises(RuntimeError, match="failed to send 1 message segment"):
+        await adapter.send_by_session(
+            SimpleNamespace(session_id="user"),
+            weixin_oc_adapter.MessageChain([Plain("current reply")]),
+        )
+
+    adapter._enqueue_pending_text_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_default_network_failure_does_not_enqueue():
+    adapter = _make_adapter()
+    adapter.client.request_json.side_effect = TimeoutError("send timeout")
+
+    with pytest.raises(TimeoutError):
+        await adapter._send_items_to_session(
+            "user", [adapter._build_plain_text_item("current reply")]
+        )
+
+    adapter._enqueue_pending_text_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manual_drain_persists_success_before_next_send_raises():
+    adapter = _make_adapter()
+    adapter._pending_text_messages = [
+        {
+            "id": str(index),
+            "user_id": "user",
+            "text": f"retained {index}",
+            "created_at": int(time.time()),
+        }
+        for index in range(3)
+    ]
+    adapter._pending_text_messages_dirty = False
+    adapter._pending_text_messages_revision = 0
+    adapter._send_items_to_session = AsyncMock(
+        side_effect=[True, TimeoutError("interrupted batch")]
+    )
+    adapter._save_account_state = AsyncMock()
+
+    with pytest.raises(TimeoutError):
+        await adapter._drain_pending_text_messages("user")
+
+    assert [entry["id"] for entry in adapter._pending_text_messages] == ["1", "2"]
+    adapter._save_account_state.assert_awaited_once()

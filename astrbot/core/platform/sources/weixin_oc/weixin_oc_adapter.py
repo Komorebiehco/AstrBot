@@ -177,7 +177,6 @@ class WeixinOCAdapter(Platform):
         self._pending_text_messages_dirty = False
         self._pending_text_messages_revision = 0
         self._pending_text_message_lock = asyncio.Lock()
-        self._pending_drain_user_ids: set[str] = set()
         self._typing_states: dict[str, TypingSessionState] = {}
         self._last_inbound_error = ""
         self._recent_message_cache_size = self._get_int_config(
@@ -712,7 +711,7 @@ class WeixinOCAdapter(Platform):
         user_id: str,
         item_list: list[dict[str, Any]],
     ) -> bool:
-        """Persist a plain-text message for delivery after context refresh.
+        """Retain explicitly queued text for manual delivery.
 
         Args:
             user_id: Weixin recipient ID.
@@ -766,10 +765,10 @@ class WeixinOCAdapter(Platform):
         return True
 
     async def _drain_pending_text_messages(self, user_id: str) -> None:
-        """Deliver queued text after an inbound message refreshes context.
+        """Explicitly deliver retained text; never call on ordinary inbound traffic.
 
         Args:
-            user_id: Weixin user whose context token was refreshed.
+            user_id: Weixin user whose retained messages should be delivered.
 
         Returns:
             None.
@@ -790,7 +789,7 @@ class WeixinOCAdapter(Platform):
                 if self._resolve_context_user_id(entry["user_id"]) == user_id
             ]
 
-        delivered_ids: set[str] = set()
+        delivered_count = 0
         for entry in pending:
             sent = await self._send_items_to_session(
                 user_id,
@@ -801,23 +800,24 @@ class WeixinOCAdapter(Platform):
             )
             if not sent:
                 break
-            delivered_ids.add(entry["id"])
-
-        if not delivered_ids:
+            # A later send may fail or be cancelled. Persist each acknowledgement
+            # immediately so it cannot leave an entire delivered batch pending.
+            async with self._pending_text_message_lock:
+                self._pending_text_messages = [
+                    message
+                    for message in self._pending_text_messages
+                    if message["id"] != entry["id"]
+                ]
+                self._pending_text_messages_revision += 1
+                self._pending_text_messages_dirty = True
+                await self._save_account_state()
+            delivered_count += 1
+        if not delivered_count:
             return
-        async with self._pending_text_message_lock:
-            self._pending_text_messages = [
-                entry
-                for entry in self._pending_text_messages
-                if entry["id"] not in delivered_ids
-            ]
-            self._pending_text_messages_revision += 1
-            self._pending_text_messages_dirty = True
-            await self._save_account_state()
         logger.info(
             "weixin_oc(%s): delivered %d queued text message(s) to %s",
             self.meta().id,
-            len(delivered_ids),
+            delivered_count,
             user_id,
         )
 
@@ -1103,7 +1103,7 @@ class WeixinOCAdapter(Platform):
         *,
         cache_components: list[Any] | None = None,
         cache_message_str: str | None = None,
-        queue_on_failure: bool = True,
+        queue_on_failure: bool = False,
     ) -> bool:
         """Send prepared Weixin items and optionally queue delayed plain text.
 
@@ -1112,7 +1112,9 @@ class WeixinOCAdapter(Platform):
             item_list: Prepared Weixin API message items.
             cache_components: Components stored in the recent-message cache.
             cache_message_str: Text stored in the recent-message cache.
-            queue_on_failure: Queue plain text after a missing or stale context.
+            queue_on_failure: Explicitly retain failed text for manual delivery.
+                Ordinary replies must report failure instead of becoming stale
+                replies to an unrelated future message.
 
         Returns:
             Whether the message was sent or accepted for delayed delivery.
@@ -1335,7 +1337,7 @@ class WeixinOCAdapter(Platform):
         segment: Image | Video | File,
         text: str | None = None,
         *,
-        queue_on_failure: bool = True,
+        queue_on_failure: bool = False,
     ) -> bool:
         if not self.token:
             logger.warning(
@@ -1878,11 +1880,8 @@ class WeixinOCAdapter(Platform):
                 self._context_tokens[from_user_id] = context_token
                 self._context_tokens_revision += 1
                 self._context_tokens_dirty = True
-            if any(
-                self._resolve_context_user_id(entry["user_id"]) == from_user_id
-                for entry in self._pending_text_messages
-            ):
-                self._pending_drain_user_ids.add(from_user_id)
+            # A new message refreshes routing context, not consent to replay old
+            # replies. Retain legacy queue data without scheduling its delivery.
 
         item_list = cast(list[dict[str, Any]], msg.get("item_list", []))
         reply_component = None
@@ -1986,18 +1985,6 @@ class WeixinOCAdapter(Platform):
         should_save_state = should_save_state or self._context_tokens_dirty
         if should_save_state:
             await self._save_account_state()
-        pending_drain_user_ids = tuple(self._pending_drain_user_ids)
-        self._pending_drain_user_ids.clear()
-        for user_id in pending_drain_user_ids:
-            try:
-                await self._drain_pending_text_messages(user_id)
-            except Exception:
-                logger.warning(
-                    "weixin_oc(%s): queued message delivery failed for %s",
-                    self.meta().id,
-                    user_id,
-                    exc_info=True,
-                )
 
     def _message_chain_to_text(self, message_chain: MessageChain) -> str:
         text = ""
@@ -2012,7 +1999,7 @@ class WeixinOCAdapter(Platform):
         text: str,
         _components: list[Any] | None = None,
         *,
-        queue_on_failure: bool = True,
+        queue_on_failure: bool = False,
     ) -> bool:
         if not text:
             text = self._message_chain_to_text(MessageChain(_components or []))
@@ -2034,7 +2021,7 @@ class WeixinOCAdapter(Platform):
         message_chain: MessageChain,
     ) -> None:
         target_user = self._resolve_context_user_id(session.session_id)
-        queue_on_failure = bool(getattr(session, "allow_delayed_delivery", True))
+        queue_on_failure = bool(getattr(session, "allow_delayed_delivery", False))
         pending_text = ""
         has_supported_segment = False
         failed_segments = 0

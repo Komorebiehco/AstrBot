@@ -29,7 +29,8 @@ async def test_poll_inbound_updates_saves_new_context_token():
     adapter.client = Client()
     adapter._sync_buf = "sync-buffer"
     adapter._context_tokens_dirty = False
-    adapter._pending_drain_user_ids = set()
+    # Even a pending drain marker left by the old implementation must not replay.
+    adapter._pending_drain_user_ids = {"user"}
     adapter._shutdown_event = asyncio.Event()
     adapter.long_poll_timeout_ms = 35_000
     adapter._is_successful_api_payload = lambda data: True
@@ -48,6 +49,7 @@ async def test_poll_inbound_updates_saves_new_context_token():
     await adapter._poll_inbound_updates()
 
     assert calls == ["handle", "save"]
+    adapter._drain_pending_text_messages.assert_not_awaited()
 
 
 @pytest.mark.asyncio
