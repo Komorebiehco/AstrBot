@@ -1136,15 +1136,11 @@ class WeixinOCAdapter(Platform):
         context_token = self._context_tokens.get(user_id)
         if not context_token:
             logger.warning(
-                "weixin_oc(%s): context token missing for %s, skip send. You should send one message to refresh context_token.",
+                "weixin_oc(%s): context token missing for %s, trying send without context",
                 self.meta().id,
                 user_id,
             )
-            if queue_on_failure and await self._enqueue_pending_text_message(
-                user_id, item_list
-            ):
-                return True
-            return False
+
         request_payload = {
             "base_info": {
                 "channel_version": "astrbot",
@@ -1155,81 +1151,115 @@ class WeixinOCAdapter(Platform):
                 "client_id": uuid.uuid4().hex,
                 "message_type": 2,
                 "message_state": 2,
-                "context_token": context_token,
                 "item_list": item_list,
             },
         }
+        if context_token:
+            request_payload["msg"]["context_token"] = context_token
+
         async with self._sendmessage_lock:
-            for attempt in range(len(self.SENDMESSAGE_RETRY_DELAYS_S) + 1):
-                if attempt == 0:
-                    elapsed = time.monotonic() - self._last_sendmessage_request_at
-                    remaining = self.SENDMESSAGE_MIN_INTERVAL_S - elapsed
-                    if remaining > 0:
-                        await asyncio.sleep(remaining)
+            fallback_used = context_token is None
+            while True:
+                response_payload: dict[str, Any] = {}
+                sent = False
+                for attempt in range(len(self.SENDMESSAGE_RETRY_DELAYS_S) + 1):
+                    if attempt == 0:
+                        elapsed = time.monotonic() - self._last_sendmessage_request_at
+                        remaining = self.SENDMESSAGE_MIN_INTERVAL_S - elapsed
+                        if remaining > 0:
+                            await asyncio.sleep(remaining)
 
-                try:
-                    response_payload = await self.client.request_json(
-                        "POST",
-                        "ilink/bot/sendmessage",
-                        payload=request_payload,
-                        token_required=True,
-                        headers={},
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "weixin_oc(%s): sendmessage request failed for %s: %s",
-                        self.meta().id,
-                        user_id,
-                        e,
-                    )
-                    if queue_on_failure and await self._enqueue_pending_text_message(
-                        user_id, item_list
-                    ):
-                        return True
-                    raise
-                self._last_sendmessage_request_at = time.monotonic()
-                if self._is_successful_api_payload(response_payload):
-                    break
+                    try:
+                        response_payload = await self.client.request_json(
+                            "POST",
+                            "ilink/bot/sendmessage",
+                            payload=request_payload,
+                            token_required=True,
+                            headers={},
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "weixin_oc(%s): sendmessage request failed for %s: %s",
+                            self.meta().id,
+                            user_id,
+                            e,
+                        )
+                        if (
+                            queue_on_failure
+                            and await self._enqueue_pending_text_message(
+                                user_id, item_list
+                            )
+                        ):
+                            return True
+                        raise
+                    self._last_sendmessage_request_at = time.monotonic()
+                    if self._is_successful_api_payload(response_payload):
+                        sent = True
+                        break
 
-                ret = int(response_payload.get("ret") or 0)
-                if ret != -2 or attempt >= len(self.SENDMESSAGE_RETRY_DELAYS_S):
+                    ret = int(response_payload.get("ret") or 0)
+                    if ret != -2 or attempt >= len(self.SENDMESSAGE_RETRY_DELAYS_S):
+                        break
+
+                    delay = self.SENDMESSAGE_RETRY_DELAYS_S[attempt]
                     logger.warning(
-                        "weixin_oc(%s): sendmessage failed for %s: %s",
+                        "weixin_oc(%s): transient sendmessage failure for %s: %s; retrying in %.1fs (%d/%d)",
                         self.meta().id,
                         user_id,
                         self._format_api_error(response_payload),
+                        delay,
+                        attempt + 2,
+                        len(self.SENDMESSAGE_RETRY_DELAYS_S) + 1,
                     )
-                    if ret == -2 and self._context_tokens.get(user_id) == context_token:
+                    await asyncio.sleep(delay)
+
+                if sent:
+                    if self._context_tokens_dirty:
+                        await self._save_account_state()
+                    break
+
+                ret = int(response_payload.get("ret") or 0)
+                logger.warning(
+                    "weixin_oc(%s): sendmessage failed for %s: %s",
+                    self.meta().id,
+                    user_id,
+                    self._format_api_error(response_payload),
+                )
+                if ret == -2 and context_token and not fallback_used:
+                    current_context_token = self._context_tokens.get(user_id)
+                    if current_context_token and current_context_token != context_token:
+                        context_token = current_context_token
+                        request_payload["msg"]["context_token"] = current_context_token
+                        request_payload["msg"]["client_id"] = uuid.uuid4().hex
+                        logger.info(
+                            "weixin_oc(%s): context token refreshed during send for %s; retrying with the newer token",
+                            self.meta().id,
+                            user_id,
+                        )
+                        continue
+                    if current_context_token == context_token:
                         # Do not discard a newer token that arrived while retries were sleeping.
                         self._context_tokens.pop(user_id, None)
                         self._context_tokens_revision += 1
                         self._context_tokens_dirty = True
                         logger.warning(
-                            "weixin_oc(%s): invalidated stale context token for %s; waiting for the next inbound message",
+                            "weixin_oc(%s): invalidated stale context token for %s; retrying without context",
                             self.meta().id,
                             user_id,
                         )
-                    if (
-                        ret == -2
-                        and queue_on_failure
-                        and await self._enqueue_pending_text_message(user_id, item_list)
-                    ):
-                        return True
-                    if self._context_tokens_dirty:
-                        await self._save_account_state()
-                    return False
-
-                delay = self.SENDMESSAGE_RETRY_DELAYS_S[attempt]
-                logger.warning(
-                    "weixin_oc(%s): transient sendmessage failure for %s: %s; retrying in %.1fs (%d/%d)",
-                    self.meta().id,
-                    user_id,
-                    self._format_api_error(response_payload),
-                    delay,
-                    attempt + 2,
-                    len(self.SENDMESSAGE_RETRY_DELAYS_S) + 1,
-                )
-                await asyncio.sleep(delay)
+                    request_payload["msg"].pop("context_token", None)
+                    request_payload["msg"]["client_id"] = uuid.uuid4().hex
+                    fallback_used = True
+                    continue
+                if (
+                    ret == -2
+                    and queue_on_failure
+                    and await self._enqueue_pending_text_message(user_id, item_list)
+                ):
+                    return True
+                if self._context_tokens_dirty:
+                    await self._save_account_state()
+                return False
         resolved_cache_components = (
             list(cache_components)
             if cache_components is not None
