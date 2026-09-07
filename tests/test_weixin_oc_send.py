@@ -50,6 +50,20 @@ def test_resolve_context_user_id_keeps_ambiguous_candidate_unchanged():
     assert adapter._resolve_context_user_id("user@im.wech") == "user@im.wech"
 
 
+def test_proactive_status_reports_missing_context_without_leaking_tokens():
+    adapter = _make_adapter()
+    assert adapter.get_proactive_delivery_status("user")["ready"] is True
+    adapter._context_tokens.clear()
+    status = adapter.get_proactive_delivery_status("user")
+    assert status["ready"] is False
+    assert status["code"] == "weixin_context_required"
+    assert "context-token" not in str(status)
+    adapter.token = ""
+    assert (
+        adapter.get_proactive_delivery_status("user")["code"] == "weixin_login_required"
+    )
+
+
 @pytest.mark.asyncio
 async def test_sendmessage_retries_transient_prepare_failure(monkeypatch):
     adapter = _make_adapter(

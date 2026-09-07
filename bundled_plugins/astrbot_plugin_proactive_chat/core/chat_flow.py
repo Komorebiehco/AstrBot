@@ -150,6 +150,60 @@ class ProactiveCoreMixin:
     async def check_and_chat(
         self, session_id: str, manual: bool = False
     ) -> dict[str, Any]:
+        """Record every execution and prevent overlapping sends to one session.
+
+        Args:
+            session_id: Fully qualified recipient UMO.
+            manual: Whether the user explicitly triggered this execution.
+
+        Returns:
+            The actual execution result, never a queue-acceptance acknowledgment.
+        """
+        session_id = self._normalize_session_id(session_id)
+        if not hasattr(self, "active_chat_sessions"):
+            self.active_chat_sessions = set()
+        if session_id in self.active_chat_sessions:
+            return {
+                "ok": False,
+                "session": session_id,
+                "message": "该会话已有任务执行中",
+            }
+        self.active_chat_sessions.add(session_id)
+        started_at = time.time()
+        execution = {
+            "status": "running",
+            "manual": manual,
+            "started_at": started_at,
+            "message": "正在检查发送条件并生成消息",
+        }
+        self.session_data.setdefault(session_id, {})["last_execution"] = execution
+        try:
+            result = await self._execute_chat(session_id, manual=manual)
+            execution.update(
+                status="success" if result.get("ok") else "failed",
+                finished_at=time.time(),
+                message=result.get("message", "执行已结束"),
+            )
+            return result
+        finally:
+            self.active_chat_sessions.discard(session_id)
+            if execution["status"] == "running":
+                execution.update(
+                    status="interrupted",
+                    finished_at=time.time(),
+                    message="任务被中断，未确认送达，不会自动补发旧消息",
+                )
+            async with self.data_lock:
+                await self._save_data_internal()
+            if self.web_admin_server:
+                try:
+                    await self.web_admin_server._broadcast_update("jobs")
+                except Exception:
+                    logger.debug("[proactive] Unable to broadcast execution result.")
+
+    async def _execute_chat(
+        self, session_id: str, manual: bool = False
+    ) -> dict[str, Any]:
         """执行一次主动消息流程并返回可供管理端展示的结果。
 
         Args:
@@ -210,6 +264,16 @@ class ProactiveCoreMixin:
                     }
 
             schedule_conf = session_config.get("schedule_settings", {})
+
+            delivery = self._get_delivery_status(normalized_session_id)
+            if not delivery["ready"]:
+                if not manual:
+                    await self._schedule_next_chat_and_save(normalized_session_id)
+                return {
+                    "ok": False,
+                    "session": normalized_session_id,
+                    "message": delivery["message"],
+                }
 
             # 未回复次数上限检查
             async with self.data_lock:
@@ -320,10 +384,13 @@ class ProactiveCoreMixin:
             delivered = await self._send_proactive_message(session_id, response_text)
             if not delivered:
                 await self._schedule_next_chat_and_save(session_id)
+                delivery = self._get_delivery_status(session_id)
                 return {
                     "ok": False,
                     "session": normalized_session_id,
-                    "message": "消息发送失败，请检查目标平台连接和日志",
+                    "message": delivery["message"]
+                    if not delivery["ready"]
+                    else "消息已生成，但平台拒绝发送；未计为成功，也不会延迟补发",
                 }
 
             await self._finalize_and_reschedule(

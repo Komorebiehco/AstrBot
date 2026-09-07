@@ -1096,6 +1096,34 @@ class WeixinOCAdapter(Platform):
             return None
         return media_path
 
+    def get_proactive_delivery_status(self, user_id: str) -> dict[str, Any]:
+        """Describe proactive delivery prerequisites without exposing credentials.
+
+        Args:
+            user_id: Recipient identifier, optionally using a shortened alias.
+
+        Returns:
+            A readiness flag, stable reason code, and user-facing explanation.
+        """
+        if not self.token:
+            return {
+                "ready": False,
+                "code": "weixin_login_required",
+                "message": "微信通道未登录，请重新登录微信适配器",
+            }
+        user_id = self._resolve_context_user_id(user_id)
+        if not self._context_tokens.get(user_id):
+            return {
+                "ready": False,
+                "code": "weixin_context_required",
+                "message": "微信会话凭据缺失或已被接口拒绝，请先在微信发一条新消息，再测试主动发送",
+            }
+        return {
+            "ready": True,
+            "code": "ready",
+            "message": "微信会话凭据已就绪；实际送达仍以发送接口返回为准",
+        }
+
     async def _send_items_to_session(
         self,
         user_id: str,

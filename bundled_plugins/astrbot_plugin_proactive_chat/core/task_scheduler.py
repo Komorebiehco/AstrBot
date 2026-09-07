@@ -176,7 +176,7 @@ class SchedulerMixin:
         if not parsed:
             return
 
-        _, msg_type, target_id = parsed
+        platform_id, msg_type, target_id = parsed
         is_friend = self._is_friend_type(msg_type)
 
         for job in self.scheduler.get_jobs():
@@ -184,8 +184,12 @@ class SchedulerMixin:
             job_parsed = self._parse_session_id(job_id)
             if not job_parsed:
                 continue
-            _, job_type, job_target = job_parsed
-            if self._is_friend_type(job_type) == is_friend and job_target == target_id:
+            job_platform, job_type, job_target = job_parsed
+            if (
+                job_platform == platform_id
+                and self._is_friend_type(job_type) == is_friend
+                and job_target == target_id
+            ):
                 try:
                     self.scheduler.remove_job(job.id)
                 except Exception:
@@ -197,7 +201,7 @@ class SchedulerMixin:
         if not parsed:
             return False
 
-        _, msg_type, target_id = parsed
+        platform_id, msg_type, target_id = parsed
         is_friend = self._is_friend_type(msg_type)
         current_time = time.time()
 
@@ -205,9 +209,10 @@ class SchedulerMixin:
             existing_parsed = self._parse_session_id(existing_id)
             if not existing_parsed:
                 continue
-            _, existing_type, existing_target = existing_parsed
+            existing_platform, existing_type, existing_target = existing_parsed
             if (
-                self._is_friend_type(existing_type) == is_friend
+                existing_platform == platform_id
+                and self._is_friend_type(existing_type) == is_friend
                 and existing_target == target_id
                 and self._is_persisted_task_still_valid(
                     existing_id, session_info, current_time=current_time
@@ -410,14 +415,10 @@ class SchedulerMixin:
             if not self._is_persisted_task_still_valid(
                 session_id, session_info, current_time=current_time
             ):
-                logger.info(
-                    f"[主动消息] {self._get_session_log_str(session_id, session_config)} 的持久化任务已过期或无效，清理后跳过恢复喵。"
-                )
-                if self._clear_session_schedule_state(session_id):
-                    cleaned_runtime_state += 1
-                    logger.debug(
-                        f"[主动消息] 已清理 {self._get_session_log_str(session_id, session_config)} 的过期持久化状态喵。"
-                    )
+                # Start one fresh schedule, never replay missed historical sends.
+                self._clear_session_schedule_state(session_id)
+                await self._schedule_next_chat_and_save(session_id)
+                logger.info("[proactive] Replaced a missed schedule after restart.")
                 continue
 
             try:
@@ -617,9 +618,9 @@ class SchedulerMixin:
                 next_trigger_time = scheduled_at + random_interval
                 run_date = datetime.fromtimestamp(next_trigger_time, tz=self.timezone)
 
-                # 自动触发生成的任务虽然不持久化到磁盘，但仍需补齐运行时元信息，
-                # 以便 Web 管理端能够正确计算倒计时进度，而不是误判为满进度。
+                # Initial automatic schedules must survive a platform restart.
                 session_payload = self.session_data.setdefault(session_id, {})
+                session_payload["next_trigger_time"] = next_trigger_time
                 session_payload["last_scheduled_at"] = scheduled_at
                 session_payload["last_schedule_min_interval_seconds"] = min_interval
                 session_payload["last_schedule_max_interval_seconds"] = max_interval
@@ -637,8 +638,9 @@ class SchedulerMixin:
                     misfire_grace_time=60,
                 )
 
+                await self._save_data_internal()
                 logger.info(
-                    f"[主动消息] {self._get_session_log_str(session_id, current_config)} 满足条件，自动触发任务已创建喵！执行时间 (非持久化): {run_date.strftime('%Y-%m-%d %H:%M:%S')} 喵"
+                    "[proactive] Persisted automatic schedule for %s.", run_date
                 )
         except Exception as e:
             logger.error(f"[主动消息] 自动触发任务创建失败喵: {e}")

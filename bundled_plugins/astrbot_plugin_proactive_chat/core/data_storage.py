@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 import aiofiles
@@ -55,14 +56,15 @@ class StorageMixin:
         try:
             # 确保目录存在
             await aio_os.makedirs(self.data_dir, exist_ok=True)
-            # 写入 JSON（避免阻塞事件循环）
-            async with aiofiles.open(
-                self.session_data_file, "w", encoding="utf-8"
-            ) as f:
+            # Replace atomically so a restart cannot leave truncated JSON.
+            destination = Path(self.session_data_file)
+            temporary = destination.with_suffix(destination.suffix + ".tmp")
+            async with aiofiles.open(temporary, "w", encoding="utf-8") as f:
                 content_to_write = await asyncio.to_thread(
                     json.dumps, self.session_data, indent=4, ensure_ascii=False
                 )
                 await f.write(content_to_write)
+            await aio_os.replace(temporary, destination)
         except OSError as e:
             logger.error(f"[主动消息] 保存会话数据失败喵: {e}")
 

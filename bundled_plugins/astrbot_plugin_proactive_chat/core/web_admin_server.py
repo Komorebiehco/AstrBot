@@ -607,7 +607,10 @@ class WebAdminServer:
         async def trigger_job(umo: str):
             # 立即手动触发一次指定会话的检查与发言流程；同一会话在执行完成前禁止重复触发。
             normalized = self.plugin._normalize_session_id(umo)
-            if normalized in self.plugin.manual_trigger_sessions:
+            if (
+                normalized in self.plugin.manual_trigger_sessions
+                or normalized in getattr(self.plugin, "active_chat_sessions", set())
+            ):
                 return JSONResponse(
                     {
                         "ok": False,
@@ -639,6 +642,7 @@ class WebAdminServer:
                     "session": normalized,
                     "message": "手动触发未返回结果",
                 }
+                self.plugin.manual_trigger_sessions.discard(normalized)
                 await self._broadcast_update("jobs")
 
             # 主动创建后台任务，避免前端请求长时间挂起等待业务执行完成。
@@ -1030,8 +1034,14 @@ class WebAdminServer:
             return []
 
         jobs = []
-        for job in self.plugin.scheduler.get_jobs():
-            session_id = str(job.id)
+        scheduled = {str(job.id): job for job in self.plugin.scheduler.get_jobs()}
+        sessions = set(scheduled) | {
+            session
+            for session, data in self.plugin.session_data.items()
+            if data.get("last_execution")
+        }
+        for session_id in sorted(sessions):
+            job = scheduled.get(session_id)
             session_data = self.plugin.session_data.get(session_id, {})
             session_config = self.plugin._get_session_config(session_id) or {}
             schedule_settings = session_config.get("schedule_settings", {})
@@ -1056,16 +1066,18 @@ class WebAdminServer:
                     ),
                     # APScheduler 的 next_run_time 是 datetime，这里统一序列化为 ISO 字符串。
                     "next_run_time": (
-                        job.next_run_time.isoformat() if job.next_run_time else None
+                        job.next_run_time.isoformat()
+                        if job and job.next_run_time
+                        else None
                     ),
+                    "last_execution": session_data.get("last_execution"),
+                    "delivery_status": self.plugin._get_delivery_status(session_id),
                     "unanswered_count": session_data.get("unanswered_count", 0),
                     "manual_trigger_in_progress": session_id
                     in self.plugin.manual_trigger_sessions,
                     "manual_trigger_result": getattr(
                         self.plugin, "manual_trigger_results", {}
-                    ).get(
-                        session_id
-                    ),
+                    ).get(session_id),
                     # 以下字段用于前端推导进度条与调度窗口说明。
                     "next_trigger_time": session_data.get("next_trigger_time"),
                     "last_scheduled_at": session_data.get("last_scheduled_at"),
@@ -1128,9 +1140,7 @@ class WebAdminServer:
                     in self.plugin.manual_trigger_sessions,
                     "manual_trigger_result": getattr(
                         self.plugin, "manual_trigger_results", {}
-                    ).get(
-                        session
-                    ),
+                    ).get(session),
                 }
             )
         return result

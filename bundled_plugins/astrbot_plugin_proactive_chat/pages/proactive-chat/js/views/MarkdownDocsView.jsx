@@ -97,20 +97,20 @@ function MarkdownDocsView() {
 
     React.useEffect(() => {
         const articleEl = articleRef.current;
-        const mermaid = window.mermaid;
+        let mermaid = window.mermaid;
         if (!articleEl) return;
 
         const mermaidBlocks = articleEl.querySelectorAll('.notification-md-mermaid[data-mermaid-source]');
         if (!mermaidBlocks.length) return;
 
-        if (!mermaid || typeof mermaid.render !== 'function') {
+        if ((!mermaid || typeof mermaid.render !== 'function') && !window.ProactiveLoader?.loadMermaid) {
             mermaidBlocks.forEach((block) => {
                 block.classList.add('is-error');
             });
             return;
         }
 
-        if (!window.__PROACTIVE_MERMAID_INITIALIZED && typeof mermaid.initialize === 'function') {
+        if (!window.__PROACTIVE_MERMAID_INITIALIZED && typeof mermaid?.initialize === 'function') {
             mermaid.initialize({
                 startOnLoad: false,
                 securityLevel: 'strict',
@@ -314,6 +314,21 @@ function MarkdownDocsView() {
         };
 
         const renderAllMermaidBlocks = async () => {
+            if (!mermaid) {
+                try {
+                    mermaid = await window.ProactiveLoader.loadMermaid();
+                    if (disposed) return;
+                    mermaid.initialize({
+                        startOnLoad: false, securityLevel: 'strict',
+                        theme: state.theme === 'dark' ? 'dark' : 'default',
+                    });
+                    window.__PROACTIVE_MERMAID_INITIALIZED = true;
+                } catch {
+                    // Keep readable diagram source when the optional CDN is unavailable.
+                    if (!disposed) mermaidBlocks.forEach(block => block.classList.add('is-error'));
+                    return;
+                }
+            }
             for (let index = 0; index < mermaidBlocks.length; index += 1) {
                 if (disposed) return;
                 const block = mermaidBlocks[index];

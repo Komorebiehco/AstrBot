@@ -81,7 +81,7 @@ function Header({ currentView }) {
                     <div className={`connection-chip ${wsConnected ? 'is-connected' : 'is-disconnected'}`}>
                         <div className="connection-chip-dot"></div>
                         <Typography variant="body2" className="connection-chip-text">
-                            {wsConnected ? '已连接' : '未连接'}
+                            {!status && state.loading ? '正在连接管理接口…' : wsConnected ? '管理接口已连接' : '管理接口未连接'}
                         </Typography>
                     </div>
 

@@ -8,6 +8,7 @@ function App() {
     const themeInitializedRef = React.useRef(false);
     const mainContentRef = React.useRef(null);
     const isRestoringRef = React.useRef(false);
+    const requestInFlightRef = React.useRef(false);
 
     const getScrollKey = React.useCallback(
         (view = state.currentView) => `astrbot_scroll_${view}`,
@@ -15,33 +16,41 @@ function App() {
     );
 
     const loadAll = React.useCallback(async () => {
+        if (requestInFlightRef.current) return;
+        requestInFlightRef.current = true;
         // 首次进入页面或手动全量刷新时，统一拉取首页所需的全部关键数据。
         dispatch({ type: 'SET_LOADING', payload: true });
         dispatch({ type: 'SET_ERROR', payload: '' });
         try {
             // 并发请求状态、会话、配置、任务与通知，减少首屏等待时间。
-            const [statusRes, sessionsRes, configRes, jobsRes, notificationsRes] = await Promise.all([
-                api.getStatus(),
-                api.listSessions(),
-                api.getConfig(),
-                api.listJobs(),
-                api.getNotifications(),
+            // Render each response as it arrives; optional data cannot block tasks.
+            const results = await Promise.allSettled([
+                api.getStatus().then(payload => {
+                    dispatch({ type: 'SET_STATUS', payload });
+                    performance.mark('proactive-data-ready');
+                }),
+                api.listJobs().then(value => dispatch({ type: 'SET_JOBS', payload: value.jobs || [] })),
+                api.getConfig().then(payload => dispatch({ type: 'SET_CONFIG', payload })),
+                api.listSessions().then(value => dispatch({ type: 'SET_SESSIONS', payload: value.sessions || [] })),
+                api.getNotifications().then(value => {
+                    dispatch({ type: 'SET_NOTIFICATIONS', payload: value.items || [] });
+                    dispatch({ type: 'SET_NOTIFICATIONS_META', payload: value.meta || null });
+                }),
             ]);
-            dispatch({ type: 'SET_STATUS', payload: statusRes });
-            dispatch({ type: 'SET_SESSIONS', payload: sessionsRes.sessions || [] });
-            dispatch({ type: 'SET_CONFIG', payload: configRes || null });
-            dispatch({ type: 'SET_JOBS', payload: jobsRes.jobs || [] });
-            dispatch({ type: 'SET_NOTIFICATIONS', payload: notificationsRes.items || [] });
-            dispatch({ type: 'SET_NOTIFICATIONS_META', payload: notificationsRes.meta || null });
+            const failed = results.find(result => result.status === 'rejected');
+            if (failed) throw failed.reason;
         } catch (e) {
             // 将后端错误或网络错误统一透传到顶部错误卡片中展示。
             dispatch({ type: 'SET_ERROR', payload: e.message || '加载失败' });
         } finally {
+            requestInFlightRef.current = false;
             dispatch({ type: 'SET_LOADING', payload: false });
         }
     }, [api, dispatch]);
 
     const loadRealtime = React.useCallback(async () => {
+        if (requestInFlightRef.current) return;
+        requestInFlightRef.current = true;
         try {
             // 轻量轮询只更新变化频率最高的状态与任务列表，避免每秒都重载完整配置。
             const [statusRes, jobsRes] = await Promise.all([
@@ -52,6 +61,8 @@ function App() {
             dispatch({ type: 'SET_JOBS', payload: jobsRes.jobs || [] });
         } catch (e) {
             // 兜底轮询失败不打断主界面；实时信息短暂过期比整页报错更友好。
+        } finally {
+            requestInFlightRef.current = false;
         }
     }, [api, dispatch]);
 
@@ -101,11 +112,13 @@ function App() {
             await loadRealtime();
         };
 
-        // 每秒一次兜底轮询；即便 WebSocket 短暂断开，界面也能维持基本新鲜度。
-        const timer = setInterval(tick, 1000);
+        // Countdown clocks are local; remote state does not need one-second polling.
+        const timer = setInterval(tick, 10000);
+        document.addEventListener('visibilitychange', tick);
         return () => {
             disposed = true;
             clearInterval(timer);
+            document.removeEventListener('visibilitychange', tick);
         };
     }, [loadRealtime]);
 
@@ -276,7 +289,9 @@ function App() {
                 <div className="main-content" ref={mainContentRef}>
                     {/* 顶部错误条统一展示最近一次加载 / 操作失败的消息。 */}
                     {state.error ? <div className="card" style={{marginBottom: 16, color: '#B3261E', background: 'rgba(179, 38, 30, 0.08)'}}>错误：{state.error}</div> : null}
-                    {renderView()}
+                    {!state.status && state.loading && state.currentView === 'status'
+                        ? <div className="card" role="status">正在加载运行状态…</div>
+                        : renderView()}
                 </div>
             </div>
         </div>

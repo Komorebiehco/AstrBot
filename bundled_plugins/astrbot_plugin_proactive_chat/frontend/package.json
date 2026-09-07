@@ -1,0 +1,16 @@
+{
+  "name": "astrbot-proactive-webui-build",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "node build.mjs" },
+  "dependencies": {
+    "@emotion/react": "11.13.3",
+    "@emotion/styled": "11.13.0",
+    "@mui/material": "5.16.7",
+    "dompurify": "3.4.15",
+    "marked": "14.1.2",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  },
+  "devDependencies": { "esbuild": "0.25.10" }
+}

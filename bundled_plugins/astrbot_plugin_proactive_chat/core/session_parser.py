@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from astrbot.core.platform.platform import PlatformStatus
-
 
 class SessionMixin:
     """会话解析与日志格式化混入类。"""
@@ -142,55 +140,44 @@ class SessionMixin:
     def _resolve_full_umo(
         self, target_id: str, msg_type: str, preferred_platform: str | None = None
     ) -> str:
+        """Resolve legacy identifiers without rewriting an explicit platform.
+
+        Args:
+            target_id: Recipient identifier.
+            msg_type: AstrBot message type.
+            preferred_platform: Persisted or explicitly configured platform ID.
+
+        Returns:
+            A full UMO, retaining ``default`` if the legacy route is ambiguous.
         """
-        动态解析并验证存活的 UMO。
-
-        优先使用首选平台（若运行中），否则尝试历史平台，再回退到当前运行平台或 default。
-        """
-        type_keyword = (
-            "Friend" if "Friend" in msg_type or "Private" in msg_type else "Group"
-        )
-
-        # 仅在“可用平台集合”中选择目标，过滤 webchat 等非目标实例
-        active_insts = {
-            p.meta().id: p
-            for p in self.context.platform_manager.get_insts()
-            if p.meta().id and "webchat" not in p.meta().id.lower()
-        }
-
-        # 首选平台仍在线时优先复用，保持会话平台一致性
-        if (
-            preferred_platform
-            and preferred_platform in active_insts
-            and active_insts[preferred_platform].status == PlatformStatus.RUNNING
-        ):
+        # Plugins initialize before platforms; availability is not identity.
+        if preferred_platform and preferred_platform != "default":
             return f"{preferred_platform}:{msg_type}:{target_id}"
 
-        # 次选：从历史 session_data 中寻找同目标且在线的平台
-        for existing_id in self.session_data.keys():
-            if type_keyword in existing_id and existing_id.endswith(f":{target_id}"):
-                p_id = existing_id.split(":")[0]
-                if (
-                    p_id in active_insts
-                    and active_insts[p_id].status == PlatformStatus.RUNNING
-                ):
-                    return existing_id
-
-        # 再次回退：任取一个当前运行平台
-        running_platforms = [
-            p for p in active_insts.values() if p.status == PlatformStatus.RUNNING
-        ]
-        if running_platforms:
-            return f"{running_platforms[0].meta().id}:{msg_type}:{target_id}"
-
-        # 最终回退：无运行平台时仅保证 UMO 结构可用
-        fallback_p_id = list(active_insts.keys())[0] if active_insts else "default"
-        return f"{fallback_p_id}:{msg_type}:{target_id}"
+        known_ids = set(getattr(self, "session_data", {}))
+        config = getattr(self, "config", {})
+        for scope in ("friend_settings", "group_settings"):
+            known_ids.update(config.get(scope, {}).get("session_list", []))
+        candidates = set()
+        for existing_id in known_ids:
+            parsed = self._parse_session_id(existing_id)
+            if (
+                parsed
+                and parsed[0] not in ("", "default")
+                and parsed[1:]
+                == (
+                    msg_type,
+                    target_id,
+                )
+            ):
+                candidates.add(parsed[0])
+        if len(candidates) == 1:
+            return f"{next(iter(candidates))}:{msg_type}:{target_id}"
+        # Never guess between platforms with a coincidentally identical user ID.
+        return f"default:{msg_type}:{target_id}"
 
     def _normalize_session_id(self, session_id: str) -> str:
-        """
-        规范化 UMO，确保使用可运行的平台前缀。
-        """
+        """Normalize legacy UMOs while preserving explicit platform identity."""
         parsed = self._parse_session_id(session_id)
         if not parsed:
             return session_id

@@ -47,9 +47,7 @@ class LifecycleMixin:
         # any recipient list saved through the WebUI always takes precedence.
         bootstrapped_friend_sessions: list[str] = []
         friend_settings = self.config.get("friend_settings", {})
-        fallback_sessions = os.environ.get(
-            "ASTRBOT_PROACTIVE_CHAT_FRIEND_SESSIONS", ""
-        )
+        fallback_sessions = os.environ.get("ASTRBOT_PROACTIVE_CHAT_FRIEND_SESSIONS", "")
         if (
             isinstance(friend_settings, dict)
             and friend_settings.get("enable", False)
@@ -74,9 +72,7 @@ class LifecycleMixin:
                     if hasattr(self.config, "save_config"):
                         self.config.save_config()
                 except Exception as e:
-                    logger.warning(
-                        f"[主动消息] 保存环境变量恢复的私聊会话失败喵: {e}"
-                    )
+                    logger.warning(f"[主动消息] 保存环境变量恢复的私聊会话失败喵: {e}")
                 logger.warning(
                     "[主动消息] 私聊会话列表为空，已从显式环境变量恢复 "
                     f"{len(bootstrapped_friend_sessions)} 个会话喵。"
@@ -93,9 +89,18 @@ class LifecycleMixin:
         # 加载持久化数据
         async with self.data_lock:
             await self._load_data_internal()
+            interrupted = False
+            for payload in self.session_data.values():
+                execution = payload.get("last_execution", {})
+                if execution.get("status") == "running":
+                    execution.update(
+                        status="interrupted",
+                        message="上次运行被重启中断，未确认送达，不会自动补发旧消息",
+                    )
+                    interrupted = True
             # 启动时先做会话键规范化，避免历史数据中的多键并存
             normalized = self._normalize_session_data()
-            if normalized:
+            if normalized or interrupted:
                 # 仅在发生规范化变更时回写，减少无效 IO
                 await self._save_data_internal()
         logger.info("[主动消息] 已成功从文件加载会话数据喵。")

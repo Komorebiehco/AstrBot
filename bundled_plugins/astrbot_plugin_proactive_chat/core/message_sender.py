@@ -308,6 +308,41 @@ class SenderMixin:
         except Exception as e:
             logger.warning(f"[主动消息] 补写平台流水失败喵: {e}", exc_info=True)
 
+    def _get_delivery_status(self, session_id: str) -> dict[str, Any]:
+        """Check the exact platform's proactive delivery prerequisites.
+
+        Args:
+            session_id: Fully qualified recipient UMO.
+
+        Returns:
+            Credential-free readiness information for execution and the WebUI.
+        """
+        parsed = self._parse_session_id(session_id)
+        if not parsed:
+            return {
+                "ready": False,
+                "code": "invalid_session",
+                "message": "会话标识无效",
+            }
+        platform = next(
+            (
+                p
+                for p in self.context.platform_manager.get_insts()
+                if p.meta().id == parsed[0]
+            ),
+            None,
+        )
+        if platform is None or platform.status != PlatformStatus.RUNNING:
+            return {
+                "ready": False,
+                "code": "platform_unavailable",
+                "message": "目标平台尚未启动或未连接，暂时无法发送",
+            }
+        checker = getattr(platform, "get_proactive_delivery_status", None)
+        if callable(checker):
+            return checker(parsed[2])
+        return {"ready": True, "code": "ready", "message": "目标平台已运行"}
+
     async def _send_chain_with_hooks(self, session_id: str, components: list) -> bool:
         """发送消息链（含装饰钩子），返回平台是否接受了消息。"""
         processed_chain_list = await self._trigger_decorating_hooks(
@@ -322,7 +357,9 @@ class SenderMixin:
         if not parsed:
             # 无法解析则使用核心 API 兜底
             try:
-                await self.context.send_message(session_id, chain)
+                accepted = await self.context.send_message(session_id, chain)
+                if accepted is False:
+                    return False
                 await self._persist_proactive_message_to_platform_history(
                     session_id, chain
                 )
@@ -347,7 +384,9 @@ class SenderMixin:
                 f"[主动消息] 找不到指定的平台 {p_id} 喵，尝试使用核心 API 兜底喵。"
             )
             try:
-                await self.context.send_message(session_id, chain)
+                accepted = await self.context.send_message(session_id, chain)
+                if accepted is False:
+                    return False
                 await self._persist_proactive_message_to_platform_history(
                     session_id, chain
                 )

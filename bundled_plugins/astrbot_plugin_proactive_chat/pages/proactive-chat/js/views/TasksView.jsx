@@ -318,7 +318,7 @@ function TasksView({ onRefresh }) {
                         const sourceModeLabel = resolveSourceModeLabel(job.source_mode);
                         const unansweredLabel = formatUnansweredLabel(job.unanswered_count, job.max_unanswered_times);
 
-                        const isTriggerRunning = Boolean(job.manual_trigger_in_progress);
+                        const isTriggerRunning = Boolean(job.manual_trigger_in_progress || job.last_execution?.status === 'running');
                         const triggerFeedback = triggerFeedbackMap[job.id];
                         const rescheduleFeedback = rescheduleFeedbackMap[job.id];
                         const isRescheduling = rescheduleFeedback?.status === 'pending';
@@ -417,6 +417,22 @@ function TasksView({ onRefresh }) {
                                         ></div>
                                     </div>
                                 </div>
+
+                                {job.delivery_status?.ready === false ? (
+                                    <Typography role="status" variant="body2" color="warning.main" sx={{ my: 1 }}>
+                                        {job.delivery_status.message}
+                                    </Typography>
+                                ) : null}
+                                {job.last_execution ? (
+                                    <Box sx={{ my: 1 }}>
+                                        <Typography variant="caption" color="text.secondary">
+                                            最近{job.last_execution.manual ? '手动' : '自动'}执行 · {formatDateTime(new Date(job.last_execution.started_at * 1000), displayTimezone, { includeSeconds: true })}
+                                        </Typography>
+                                        <Typography variant="body2" color={job.last_execution.status === 'success' ? 'success.main' : job.last_execution.status === 'running' ? 'text.secondary' : 'error.main'}>
+                                            {job.last_execution.message}
+                                        </Typography>
+                                    </Box>
+                                ) : null}
 
                                 <Box
                                     sx={{
