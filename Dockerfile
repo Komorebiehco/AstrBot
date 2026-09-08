@@ -1,7 +1,17 @@
+FROM node:22-bookworm-slim AS dashboard-build
+WORKDIR /build/dashboard
+COPY dashboard/package.json dashboard/pnpm-lock.yaml ./
+RUN npm install --global pnpm@10.11.0 \
+    && pnpm install --frozen-lockfile
+COPY dashboard/ ./
+COPY astrbot/__init__.py /build/astrbot/__init__.py
+COPY astrbot/core/utils/t2i/template/shiki_runtime.iife.js /build/astrbot/core/utils/t2i/template/shiki_runtime.iife.js
+RUN pnpm run build \
+    && node -e "const fs=require('fs'); const v=fs.readFileSync('../astrbot/__init__.py','utf8').match(/__version__ = \"([^\"]+)\"/)[1]; fs.mkdirSync('dist/assets',{recursive:true}); fs.writeFileSync('dist/assets/version',v);"
+
 FROM python:3.12-slim
 WORKDIR /AstrBot
-
-COPY . /AstrBot/
+ENV ASTRBOT_WEBUI_DIR=/AstrBot/astrbot/dashboard/dist
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
@@ -18,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     p7zip-full \
     unzip \
     unrar-free \
+    fonts-noto-cjk \
     curl \
     gnupg \
     git \
@@ -25,6 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean
+
+COPY . /AstrBot/
+COPY --from=dashboard-build /build/dashboard/dist /AstrBot/astrbot/dashboard/dist
 
 RUN python -m pip install uv \
     && echo "3.12" > .python-version \

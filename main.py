@@ -148,7 +148,7 @@ if __name__ == "__main__":
         "--webui-dir",
         type=str,
         help="Specify the directory path for WebUI static files",
-        default=None,
+        default=os.environ.get("ASTRBOT_WEBUI_DIR"),
     )
     parser.add_argument(
         "--reset-password",

@@ -80,6 +80,7 @@ async def test_sandbox_file_download_handles_windows_remote_filename(
     )
 
     async def _download_file(_remote_path, local_path):
+        # Assert the remote basename without constraining platform separators.
         local_name = os.path.basename(local_path)
         assert local_name.endswith("report.txt")
         assert "\\" not in local_name
