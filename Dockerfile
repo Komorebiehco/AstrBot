@@ -7,7 +7,7 @@ COPY dashboard/ ./
 COPY astrbot/__init__.py /build/astrbot/__init__.py
 COPY astrbot/core/utils/t2i/template/shiki_runtime.iife.js /build/astrbot/core/utils/t2i/template/shiki_runtime.iife.js
 RUN pnpm run build \
-    && node -e "const fs=require('fs'); const v=fs.readFileSync('../astrbot/__init__.py','utf8').match(/__version__ = \"([^\"]+)\"/)[1]; fs.mkdirSync('dist/assets',{recursive:true}); fs.writeFileSync('dist/assets/version',v);"
+    && node -e "const fs=require('fs'); const v=fs.readFileSync('../astrbot/__init__.py','utf8').match(/__version__ = \"([^\"]+)\"/)[1]; fs.mkdirSync('dist/assets',{recursive:true}); fs.writeFileSync('dist/assets/version','v'+v);"
 
 FROM python:3.12-slim
 WORKDIR /AstrBot
