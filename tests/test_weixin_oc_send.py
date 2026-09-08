@@ -50,15 +50,16 @@ def test_resolve_context_user_id_keeps_ambiguous_candidate_unchanged():
     assert adapter._resolve_context_user_id("user@im.wech") == "user@im.wech"
 
 
-def test_proactive_status_reports_missing_context_without_leaking_tokens():
+def test_proactive_status_allows_context_free_attempt_without_leaking_tokens():
     adapter = _make_adapter()
     assert adapter.get_proactive_delivery_status("user")["ready"] is True
     adapter._context_tokens.clear()
     status = adapter.get_proactive_delivery_status("user")
-    assert status["ready"] is False
-    assert status["code"] == "weixin_context_required"
+    assert status["ready"] is True
+    assert status["code"] == "weixin_context_optional"
     assert "context-token" not in str(status)
     adapter.token = ""
+    assert adapter.get_proactive_delivery_status("user")["ready"] is False
     assert (
         adapter.get_proactive_delivery_status("user")["code"] == "weixin_login_required"
     )
@@ -107,15 +108,15 @@ async def test_sendmessage_stops_after_transient_retry_limit(monkeypatch):
     assert result is False
     assert adapter.client.request_json.await_count == len(responses)
     assert sleep.await_count == 2 * len(adapter.SENDMESSAGE_RETRY_DELAYS_S) + 1
-    assert "user" not in adapter._context_tokens
-    assert adapter._context_tokens_revision == 1
-    adapter._save_account_state.assert_awaited_once()
+    assert adapter._context_tokens["user"] == "context-token"
+    assert adapter._context_tokens_revision == 0
+    adapter._save_account_state.assert_not_awaited()
     adapter._cache_recent_message.assert_not_called()
     adapter._enqueue_pending_text_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_sendmessage_retries_without_stale_context(monkeypatch):
+async def test_context_free_fallback_does_not_discard_cached_context(monkeypatch):
     adapter = _make_adapter()
     adapter.client.request_json = AsyncMock(
         side_effect=[
@@ -139,10 +140,10 @@ async def test_sendmessage_retries_without_stale_context(monkeypatch):
         adapter.client.request_json.await_count
         == len(adapter.SENDMESSAGE_RETRY_DELAYS_S) + 2
     )
-    assert "user" not in adapter._context_tokens
+    assert adapter._context_tokens["user"] == "context-token"
     fallback_payload = adapter.client.request_json.await_args_list[-1].kwargs["payload"]
     assert "context_token" not in fallback_payload["msg"]
-    adapter._save_account_state.assert_awaited_once()
+    adapter._save_account_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -194,6 +195,117 @@ async def test_sendmessage_does_not_retry_non_transient_error(monkeypatch):
     adapter.client.request_json.assert_awaited_once()
     sleep.assert_not_awaited()
     adapter._cache_recent_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_context", [True, False])
+async def test_later_send_recovers_without_an_inbound_message(
+    monkeypatch, with_context
+):
+    attempts = (2 if with_context else 1) * (
+        len(WeixinOCAdapter.SENDMESSAGE_RETRY_DELAYS_S) + 1
+    )
+    adapter = _make_adapter(
+        *(
+            {"ret": -2, "errcode": 0, "errmsg": "prepare failed"}
+            for _ in range(attempts)
+        ),
+        {"ret": 0, "errcode": 0},
+    )
+    if not with_context:
+        adapter._context_tokens.clear()
+    adapter._save_account_state = AsyncMock()
+    monkeypatch.setattr(weixin_oc_adapter.asyncio, "sleep", AsyncMock())
+
+    assert (
+        await adapter._send_items_to_session(
+            "user", [adapter._build_plain_text_item("first scheduled attempt")]
+        )
+        is False
+    )
+    assert adapter.get_proactive_delivery_status("user")["ready"] is True
+    assert (
+        await adapter._send_items_to_session(
+            "user", [adapter._build_plain_text_item("next scheduled message")]
+        )
+        is True
+    )
+
+    payload = adapter.client.request_json.await_args.kwargs["payload"]
+    assert payload["msg"].get("context_token") == (
+        "context-token" if with_context else None
+    )
+    assert adapter.client.request_json.await_count == attempts + 1
+    adapter._cache_recent_message.assert_called_once()
+    adapter._enqueue_pending_text_message.assert_not_awaited()
+    adapter._save_account_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_context_refresh_cannot_extend_retries_indefinitely(monkeypatch):
+    adapter = _make_adapter()
+    adapter._save_account_state = AsyncMock()
+    calls = 0
+
+    async def fail_and_refresh(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        adapter._context_tokens["user"] = f"context-{calls}"
+        adapter._context_tokens_dirty = True
+        adapter._context_tokens_revision += 1
+        return {"ret": -2, "errcode": 0, "errmsg": "prepare failed"}
+
+    adapter.client.request_json = AsyncMock(side_effect=fail_and_refresh)
+    monkeypatch.setattr(weixin_oc_adapter.asyncio, "sleep", AsyncMock())
+
+    assert (
+        await adapter._send_items_to_session(
+            "user", [adapter._build_plain_text_item("hello")]
+        )
+        is False
+    )
+
+    assert calls == 3 * (len(adapter.SENDMESSAGE_RETRY_DELAYS_S) + 1)
+    assert adapter._context_tokens["user"] == f"context-{calls}"
+    adapter._save_account_state.assert_awaited_once()
+    adapter._enqueue_pending_text_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_uses_context_received_while_waiting_for_lock():
+    adapter = _make_adapter({"ret": 0, "errcode": 0})
+    await adapter._sendmessage_lock.acquire()
+    task = asyncio.create_task(
+        adapter._send_items_to_session(
+            "user", [adapter._build_plain_text_item("hello")]
+        )
+    )
+    await asyncio.sleep(0)
+    adapter._context_tokens["user"] = "newer-context"
+    adapter._sendmessage_lock.release()
+
+    assert await task is True
+    payload = adapter.client.request_json.await_args.kwargs["payload"]
+    assert payload["msg"]["context_token"] == "newer-context"
+
+
+@pytest.mark.asyncio
+async def test_explicit_login_error_does_not_use_prepare_failure_fallback(monkeypatch):
+    adapter = _make_adapter({"ret": -2, "errcode": -14, "errmsg": "login expired"})
+    sleep = AsyncMock()
+    monkeypatch.setattr(weixin_oc_adapter.asyncio, "sleep", sleep)
+
+    assert (
+        await adapter._send_items_to_session(
+            "user", [adapter._build_plain_text_item("hello")]
+        )
+        is False
+    )
+
+    adapter.client.request_json.assert_awaited_once()
+    sleep.assert_not_awaited()
+    assert adapter._context_tokens["user"] == "context-token"
+    adapter._enqueue_pending_text_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -420,7 +532,7 @@ async def test_missing_context_does_not_queue_media_payload(monkeypatch):
 async def test_retry_exhaustion_can_explicitly_retain_plain_text(monkeypatch):
     responses = [
         {"ret": -2, "errcode": 0, "errmsg": "prepare failed"}
-        for _ in range(len(WeixinOCAdapter.SENDMESSAGE_RETRY_DELAYS_S) + 1)
+        for _ in range(2 * (len(WeixinOCAdapter.SENDMESSAGE_RETRY_DELAYS_S) + 1))
     ]
     adapter = _make_adapter(*responses)
     del adapter._enqueue_pending_text_message
@@ -437,8 +549,8 @@ async def test_retry_exhaustion_can_explicitly_retain_plain_text(monkeypatch):
     )
 
     assert result is True
-    assert "user" not in adapter._context_tokens
-    assert adapter._context_tokens_revision == 1
+    assert adapter._context_tokens["user"] == "context-token"
+    assert adapter._context_tokens_revision == 0
     assert [entry["text"] for entry in adapter._pending_text_messages] == ["delayed"]
     adapter._save_account_state.assert_awaited_once()
 

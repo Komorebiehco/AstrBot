@@ -1114,9 +1114,9 @@ class WeixinOCAdapter(Platform):
         user_id = self._resolve_context_user_id(user_id)
         if not self._context_tokens.get(user_id):
             return {
-                "ready": False,
-                "code": "weixin_context_required",
-                "message": "微信会话凭据缺失或已被接口拒绝，请先在微信发一条新消息，再测试主动发送",
+                "ready": True,
+                "code": "weixin_context_optional",
+                "message": "未缓存微信会话凭据，将自动尝试无上下文发送；是否送达以接口返回为准",
             }
         return {
             "ready": True,
@@ -1163,14 +1163,6 @@ class WeixinOCAdapter(Platform):
                 self.meta().id,
             )
             return False
-        context_token = self._context_tokens.get(user_id)
-        if not context_token:
-            logger.warning(
-                "weixin_oc(%s): context token missing for %s, trying send without context",
-                self.meta().id,
-                user_id,
-            )
-
         request_payload = {
             "base_info": {
                 "channel_version": "astrbot",
@@ -1184,11 +1176,20 @@ class WeixinOCAdapter(Platform):
                 "item_list": item_list,
             },
         }
-        if context_token:
-            request_payload["msg"]["context_token"] = context_token
-
         async with self._sendmessage_lock:
-            fallback_used = context_token is None
+            # Read after acquiring the lock: another send may have kept us
+            # waiting while an inbound message supplied a newer context.
+            context_token = self._context_tokens.get(user_id)
+            if context_token:
+                request_payload["msg"]["context_token"] = context_token
+            else:
+                logger.warning(
+                    "weixin_oc(%s): context token missing for %s, trying send without context",
+                    self.meta().id,
+                    user_id,
+                )
+            fallback_used = not context_token
+            refreshed_context_used = False
             while True:
                 response_payload: dict[str, Any] = {}
                 sent = False
@@ -1228,7 +1229,12 @@ class WeixinOCAdapter(Platform):
                         break
 
                     ret = int(response_payload.get("ret") or 0)
-                    if ret != -2 or attempt >= len(self.SENDMESSAGE_RETRY_DELAYS_S):
+                    errcode = int(response_payload.get("errcode") or 0)
+                    if (
+                        ret != -2
+                        or errcode != 0
+                        or attempt >= len(self.SENDMESSAGE_RETRY_DELAYS_S)
+                    ):
                         break
 
                     delay = self.SENDMESSAGE_RETRY_DELAYS_S[attempt]
@@ -1249,16 +1255,22 @@ class WeixinOCAdapter(Platform):
                     break
 
                 ret = int(response_payload.get("ret") or 0)
+                retryable = ret == -2 and not int(response_payload.get("errcode") or 0)
                 logger.warning(
                     "weixin_oc(%s): sendmessage failed for %s: %s",
                     self.meta().id,
                     user_id,
                     self._format_api_error(response_payload),
                 )
-                if ret == -2 and context_token and not fallback_used:
+                if retryable:
                     current_context_token = self._context_tokens.get(user_id)
-                    if current_context_token and current_context_token != context_token:
+                    if (
+                        current_context_token
+                        and current_context_token != context_token
+                        and not refreshed_context_used
+                    ):
                         context_token = current_context_token
+                        refreshed_context_used = True
                         request_payload["msg"]["context_token"] = current_context_token
                         request_payload["msg"]["client_id"] = uuid.uuid4().hex
                         logger.info(
@@ -1267,22 +1279,20 @@ class WeixinOCAdapter(Platform):
                             user_id,
                         )
                         continue
-                    if current_context_token == context_token:
-                        # Do not discard a newer token that arrived while retries were sleeping.
-                        self._context_tokens.pop(user_id, None)
-                        self._context_tokens_revision += 1
-                        self._context_tokens_dirty = True
+                    if context_token and not fallback_used:
+                        # "prepare failed" does not prove credential expiry.
+                        # Retain the cached context for future scheduled sends.
                         logger.warning(
-                            "weixin_oc(%s): invalidated stale context token for %s; retrying without context",
+                            "weixin_oc(%s): retaining context after prepare failure for %s; trying one context-free fallback",
                             self.meta().id,
                             user_id,
                         )
-                    request_payload["msg"].pop("context_token", None)
-                    request_payload["msg"]["client_id"] = uuid.uuid4().hex
-                    fallback_used = True
-                    continue
+                        request_payload["msg"].pop("context_token", None)
+                        request_payload["msg"]["client_id"] = uuid.uuid4().hex
+                        fallback_used = True
+                        continue
                 if (
-                    ret == -2
+                    retryable
                     and queue_on_failure
                     and await self._enqueue_pending_text_message(user_id, item_list)
                 ):

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from astrbot.core.platform.platform import PlatformStatus
+from astrbot.core.platform.sources.weixin_oc.weixin_oc_adapter import WeixinOCAdapter
 from bundled_plugins.astrbot_plugin_proactive_chat.core.chat_flow import (
     ProactiveCoreMixin,
 )
@@ -153,10 +154,10 @@ def test_job_purge_does_not_cross_platform_boundaries(plugin):
 
 
 @pytest.mark.asyncio
-async def test_missing_delivery_context_skips_llm_and_records_failure(plugin):
+async def test_unavailable_delivery_skips_llm_and_records_failure(plugin):
     plugin._get_delivery_status = lambda _: {
         "ready": False,
-        "message": "请在微信发送新消息",
+        "message": "微信通道尚未登录",
     }
     result = await plugin.check_and_chat(SESSION)
     assert result["ok"] is False
@@ -166,6 +167,36 @@ async def test_missing_delivery_context_skips_llm_and_records_failure(plugin):
     assert saved[SESSION]["last_execution"]["status"] == "failed"
     assert saved[SESSION]["last_execution"]["manual"] is False
     assert "next_trigger_time" in saved[SESSION]
+
+
+@pytest.mark.asyncio
+async def test_missing_context_still_reaches_automatic_delivery(plugin):
+    adapter = object.__new__(WeixinOCAdapter)
+    adapter.token = "test-login"
+    adapter._context_tokens = {}
+    adapter.metadata = SimpleNamespace(id="weixin_personal_iyxm")
+    adapter._started_at = None
+    adapter.status = PlatformStatus.RUNNING
+    plugin.context.platform_manager.get_insts = lambda: [adapter]
+
+    result = await plugin.check_and_chat(SESSION)
+
+    assert result["ok"] is True
+    plugin._send_proactive_message.assert_awaited_once()
+    assert plugin.session_data[SESSION]["last_execution"]["manual"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit, allowed", [(0, True), (4, False)])
+async def test_unanswered_limit_zero_allows_unattended_delivery(plugin, limit, allowed):
+    plugin.settings["schedule_settings"]["max_unanswered_times"] = limit
+    plugin.session_data[SESSION] = {"unanswered_count": 20}
+    plugin._get_delivery_status = lambda _: {"ready": True}
+
+    result = await plugin.check_and_chat(SESSION)
+
+    assert result["ok"] is allowed
+    assert plugin._send_proactive_message.await_count == int(allowed)
 
 
 @pytest.mark.asyncio
